@@ -5,11 +5,11 @@ import pandas as pd
 import os
 import xml.etree.ElementTree as ET
 import io
-import logging # Importar logging para mensajes más detallados
+import logging
+import zipfile # <-- Importar zipfile para manejar archivos KMZ
 
 # Configuración básica de logging para ver mensajes en Streamlit Cloud logs
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
 
 # Importar el módulo script2 completo
 import script2
@@ -21,7 +21,7 @@ st.set_page_config(page_title="Pantalla Cabina", layout="wide")
 st.title("🚆 Vista estilo cabina - Perfil altimétrico en tiempo real")
 
 st.markdown("""
-Cargá un archivo **CSV** o **KML** con estaciones (Nombre, Km, Lat, Lon). El sistema mostrará el perfil altimétrico alrededor del kilómetro actual.
+Cargá un archivo **CSV**, **KML** o **KMZ** con estaciones (Nombre, Km, Lat, Lon). El sistema mostrará el perfil altimétrico alrededor del kilómetro actual.
 
 También podés elegir un subtramo del archivo y cuántos *workers* usar para consultar elevaciones. Más workers = más rápido, pero puede ser rechazado por la API (Error 429).
 """)
@@ -43,6 +43,7 @@ def procesar_kml(kml_file_object):
     ns = {'kml': 'http://www.opengis.net/kml/2.2'}
     datos = []
     try:
+        # Es buena práctica resetear la posición del buffer antes de leerlo si pudiera haberse leído antes
         kml_file_object.seek(0)
         tree = ET.parse(kml_file_object)
         root = tree.getroot()
@@ -77,16 +78,28 @@ def procesar_kml(kml_file_object):
 
                         # Limpiar y convertir el string del KM a float
                         # Eliminar caracteres no numéricos comunes al final si existen (ej. '?')
+                        # Solo mantener dígitos, punto y signo negativo/positivo
                         km_value_str_cleaned = ''.join(filter(lambda x: x.isdigit() or x == '.' or x == '-', km_value_str))
-                        try:
-                             parsed_km = float(km_value_str_cleaned)
-                        except ValueError:
-                            logging.warning(f"Placemark {i+1}: No se pudo convertir '{km_value_str_cleaned}' (obtenido de '{km_value_str}') a número KM desde el nombre '{nombre_completo_str}'. KM será NaN.")
-                            parsed_km = np.nan # Asegurar que sea NaN si falla conversión
+                        # Asegurarse de que el string resultante no esté vacío o sea solo signo
+                        if km_value_str_cleaned and km_value_str_cleaned not in ['-', '+']:
+                             try:
+                                parsed_km = float(km_value_str_cleaned)
+                             except ValueError:
+                                logging.warning(f"Placemark {i+1}: No se pudo convertir '{km_value_str_cleaned}' (obtenido de '{km_value_str}') a número KM desde el nombre '{nombre_completo_str}'. KM será NaN.")
+                                parsed_km = np.nan # Asegurar que sea NaN si falla conversión
+                             except Exception as e:
+                                logging.error(f"Placemark {i+1}: Error inesperado al convertir KM '{km_value_str_cleaned}' en nombre '{nombre_completo_str}': {e}. KM será NaN.")
+                                parsed_km = np.nan
+                        else:
+                             logging.warning(f"Placemark {i+1}: String KM limpio '{km_value_str_cleaned}' está vacío o es solo signo desde el nombre '{nombre_completo_str}'. KM será NaN.")
+                             parsed_km = np.nan
+
+
                     else:
                         # Si " KM " no se encuentra, el nombre completo es el nombre, KM es NaN
                         parsed_name = nombre_completo_str.strip()
-                        logging.warning(f"Placemark {i+1}: No se encontró ' KM ' en el nombre '{nombre_completo_str}'. KM será NaN.")
+                        # No loguear warning si el nombre no tiene " KM ", ya que es un formato posible
+                        # logging.warning(f"Placemark {i+1}: No se encontró ' KM ' en el nombre '{nombre_completo_str}'. KM será NaN.")
                         parsed_km = np.nan # KM es NaN por defecto
 
                 except Exception as e:
@@ -100,8 +113,7 @@ def procesar_kml(kml_file_object):
                 try:
                     coords_str = coords_tag.text.strip()
                     # Las coordenadas en KML suelen ser lon,lat,alt (separadas por coma)
-                    # Asegurarse de manejar comas como separador decimal si es el caso en la fuente original
-                    # Pero KML estándar usa punto para decimal. Asumimos KML estándar lon,lat,alt con punto decimal.
+                    # Asumimos KML estándar con punto decimal.
                     partes_coord = coords_str.split(',')
                     if len(partes_coord) >= 2:
                         # Convertir lon y lat a float. KML usa punto decimal.
@@ -130,7 +142,7 @@ def procesar_kml(kml_file_object):
             # --- Añadir a la lista de datos ---
             # Solo añadimos si se pudo obtener un nombre (aunque sea el nombre completo sin KM parseado)
             # y si las coordenadas Lat/Lon son válidas (no NaN).
-            # El KM puede ser NaN si no se pudo parsear.
+            # El KM puede ser NaN si no se pudo parsear, esas filas se descartarán más tarde en cargar_estaciones.
             if parsed_name and not (np.isnan(lat) or np.isnan(lon)):
                  datos.append({
                      'Nombre': parsed_name, # Usar el nombre parseado
@@ -143,7 +155,7 @@ def procesar_kml(kml_file_object):
                       logging.warning(f"Placemark {i+1}: Saltando entrada KML para '{nombre_completo_str}' debido a nombre vacío o coordenadas inválidas/faltantes.")
 
 
-        logging.info(f"Procesamiento KML finalizado. Encontrados {len(datos)} puntos con nombre y coordenadas válidas.")
+        logging.info(f"Procesamiento KML finalizado. Encontrados {len(datos)} puntos con nombre y coordenadas válidas antes de validación de KM.")
         return pd.DataFrame(datos)
 
     except Exception as e:
@@ -153,13 +165,13 @@ def procesar_kml(kml_file_object):
 
 
 # --- Cargar archivo ---
-archivo_subido = st.file_uploader("📤 Subí tu archivo CSV o KML", type=["csv", "kml"])
+# Modificado para aceptar KMZ
+archivo_subido = st.file_uploader("📤 Subí tu archivo CSV, KML o KMZ", type=["csv", "kml", "kmz"]) # <-- Añadido "kmz"
 df_estaciones = pd.DataFrame()
 
 if archivo_subido:
     if archivo_subido.name.endswith(".csv"):
         try:
-            # pandas read_csv puede leer directamente del objeto UploadedFile
             df_estaciones = pd.read_csv(archivo_subido)
         except Exception as e:
             st.error(f"Error al leer el archivo CSV: {e}")
@@ -168,28 +180,62 @@ if archivo_subido:
 
     elif archivo_subido.name.endswith(".kml"):
         try:
-            # Leer el contenido del archivo subido a un buffer en memoria (BytesIO)
-            kml_bytes = archivo_subido.getvalue() # getvalue() obtiene los bytes del archivo
+            kml_bytes = archivo_subido.getvalue()
             kml_file_object = io.BytesIO(kml_bytes)
-            # Pasar el objeto BytesIO a procesar_kml
             df_estaciones = procesar_kml(kml_file_object)
         except Exception as e:
-            # Errores más específicos se loguean dentro de procesar_kml
             st.error(f"Error al procesar el archivo KML.")
             logging.error(f"Error al procesar el archivo KML: {e}", exc_info=True)
+            df_estaciones = pd.DataFrame()
+
+    # --- Manejar archivos KMZ ---
+    elif archivo_subido.name.endswith(".kmz"):
+        try:
+            # Abrir el archivo KMZ como un archivo Zip
+            with zipfile.ZipFile(archivo_subido, 'r') as kmz_archive:
+                kml_filename = None
+                # Buscar un archivo KML dentro del KMZ
+                # Priorizar doc.kml, si no, el primero que termine en .kml
+                for name in kmz_archive.namelist():
+                    if name == 'doc.kml':
+                        kml_filename = name
+                        break # Encontrado doc.kml, usar este
+                    elif name.lower().endswith('.kml') and kml_filename is None:
+                        # Si no es doc.kml, pero es un .kml, guardarlo como opción secundaria
+                        kml_filename = name
+
+                if kml_filename:
+                    logging.info(f"Encontrado archivo KML '{kml_filename}' dentro del KMZ.")
+                    with kmz_archive.open(kml_filename, 'r') as kml_in_zip:
+                        # Leer el contenido del archivo KML dentro del ZIP
+                        kml_bytes = kml_in_zip.read()
+                        kml_file_object = io.BytesIO(kml_bytes)
+                        # Pasar el contenido KML a la función procesar_kml
+                        df_estaciones = procesar_kml(kml_file_object)
+                else:
+                    st.error("❌ El archivo KMZ no contiene un archivo KML válido (buscando 'doc.kml' o cualquier archivo .kml dentro).")
+                    df_estaciones = pd.DataFrame() # Asegurar empty DataFrame on failure
+
+        except zipfile.BadZipFile:
+            st.error("❌ Error: El archivo subido no parece ser un archivo KMZ (Zip) válido.")
+            logging.error("Error: El archivo subido no parece ser un archivo KMZ (Zip) válido.", exc_info=True)
+            df_estaciones = pd.DataFrame()
+        except Exception as e:
+            st.error(f"❌ Error general al procesar el archivo KMZ.")
+            logging.error(f"Error general al procesar el archivo KMZ: {e}", exc_info=True)
             df_estaciones = pd.DataFrame()
 
 
 # --- Validación y selección de subtramo ---
 # Verificar si el DataFrame no está vacío y tiene las columnas requeridas antes de cargarlas
 # La función cargar_estaciones también valida y limpia, pero esta es una pre-validación rápida.
-# Ahora, después de procesar KML, el DataFrame puede tener 'Km' como NaN. cargar_estaciones
-# eliminará las filas con Km=NaN.
+# Ahora, después de procesar KML/KMZ, el DataFrame puede tener 'Km' como NaN para algunas filas.
+# cargar_estaciones eliminará las filas con Km=NaN (o nombre/lat/lon=NaN).
 if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_estaciones.columns):
     # Cargar y validar estaciones usando la función de script2
     # Esta función ya limpia, valida y ordena, y retorna una lista de namedtuples
     try:
-        # cargar_estaciones eliminará las filas donde Km es NaN.
+        # cargar_estaciones eliminará las filas donde Km, Nombre, Lat o Lon son NaN.
         estaciones_cargadas = script2.cargar_estaciones(df_estaciones)
         # Convertir la lista de namedtuples a DataFrame para usar con selectbox/loc
         # Las columnas serán 'nombre', 'km', 'lat', 'lon' (en minúscula)
@@ -205,7 +251,7 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
 
 
     if df_estaciones_ordenadas.empty or len(df_estaciones_ordenadas) < 2:
-        st.error("❌ No hay suficientes estaciones válidas con datos completos (Nombre, Km, Lat, Lon) después de la limpieza y validación. Asegúrate de que los nombres en tu KML contengan el patrón ' KM ##.#' y que las coordenadas sean válidas.")
+        st.error("❌ No hay suficientes estaciones válidas con datos completos (Nombre, Km, Lat, Lon) después de la limpieza y validación. Asegúrate de que tus datos de entrada (CSV, KML o KMZ) contengan puntos con nombre, coordenadas y Km válidos. Para KML/KMZ, el Km se intenta extraer del nombre usando el patrón ' Nombre KM ##.#'.")
         st.stop()
 
     # Ahora acceder a la columna 'nombre' en minúscula
@@ -330,7 +376,7 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
                     slope_data_vis=pendientes_vis,
                     theme="dark",
                     colors="cyan,yellow",
-                    watermark="Perfil LAL 2025"
+                    watermark="LAL"
                 )
 
                 if fig:
@@ -449,4 +495,4 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
          pass
 
 if not archivo_subido:
-     st.info("⬆️ Subí un archivo CSV o KML para empezar.")
+     st.info("⬆️ Subí un archivo CSV, KML o KMZ para empezar.")
