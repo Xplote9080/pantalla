@@ -246,7 +246,7 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
                     slope_data_vis=pendientes_vis, # <-- CORRECCIÓN AQUÍ: Usar slope_data_vis
                     theme="dark",
                     colors="cyan,yellow",
-                    watermark="Perfil LAL 2025"
+                    watermark="LAL"
                 )
 
                 if fig:
