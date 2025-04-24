@@ -5,6 +5,11 @@ import pandas as pd
 import os
 import xml.etree.ElementTree as ET
 import io
+import logging # Importar logging para mensajes más detallados
+
+# Configuración básica de logging para ver mensajes en Streamlit Cloud logs
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 
 # Importar el módulo script2 completo
 import script2
@@ -33,67 +38,118 @@ script2._cache = initialize_elevation_cache()
 
 
 # --- Procesar KML ---
+# Modificada para aceptar un objeto archivo (como io.BytesIO) y parsear Nombre/KM correctamente
 def procesar_kml(kml_file_object):
     ns = {'kml': 'http://www.opengis.net/kml/2.2'}
+    datos = []
     try:
         kml_file_object.seek(0)
         tree = ET.parse(kml_file_object)
-    except Exception as e:
-         st.error(f"Error al parsear el archivo KML. Asegúrate de que sea un archivo KML válido: {e}")
-         return pd.DataFrame()
-    root = tree.getroot()
-    placemarks = root.findall('.//kml:Placemark', ns)
-    datos = []
-    if not placemarks:
-        st.warning("No se encontraron Placemarks en el archivo KML.")
-        return pd.DataFrame()
+        root = tree.getroot()
+        placemarks = root.findall('.//kml:Placemark', ns)
 
-    for pm in placemarks:
-        name_tag = pm.find('kml:name', ns)
-        point_tag = pm.find('.//kml:Point', ns)
-        coord_tag = point_tag.find('kml:coordinates', ns) if point_tag is not None else None
+        if not placemarks:
+            st.warning("No se encontraron Placemarks en el archivo KML.")
+            return pd.DataFrame()
 
-        nombre = name_tag.text.strip() if name_tag is not None and name_tag.text else ""
-        km = np.nan
-        lat = np.nan
-        lon = np.nan
+        logging.info(f"Encontrados {len(placemarks)} Placemarks en el KML.")
 
-        if nombre:
-            if ',' in nombre:
-                partes_nombre = nombre.split(',', 1)
-                nombre_limpio = partes_nombre[0].strip()
-                km_str = partes_nombre[1].strip() if len(partes_nombre) > 1 else ""
+        for i, pm in enumerate(placemarks):
+            nombre_tag = pm.find('kml:name', ns)
+            punto_tag = pm.find('.//kml:Point', ns)
+            coords_tag = punto_tag.find('kml:coordinates', ns) if punto_tag is not None else None
+
+            nombre_completo_str = nombre_tag.text.strip() if nombre_tag is not None and nombre_tag.text else ""
+            lat = np.nan
+            lon = np.nan
+            parsed_name = ""
+            parsed_km = np.nan
+
+            # --- Parsear Nombre y KM ---
+            if nombre_completo_str:
                 try:
-                    km = float(km_str)
-                except ValueError:
-                    km = np.nan
+                    # Intentar dividir por " KM " para separar nombre y KM
+                    km_split = nombre_completo_str.split(" KM ")
+                    if len(km_split) > 1:
+                        # Si se pudo dividir, la parte antes de " KM " es el nombre, la última es el KM
+                        parsed_name = " KM ".join(km_split[:-1]).strip()
+                        km_value_str = km_split[-1].strip()
 
-            if coord_tag is not None and coord_tag.text:
+                        # Limpiar y convertir el string del KM a float
+                        # Eliminar caracteres no numéricos comunes al final si existen (ej. '?')
+                        km_value_str_cleaned = ''.join(filter(lambda x: x.isdigit() or x == '.' or x == '-', km_value_str))
+                        try:
+                             parsed_km = float(km_value_str_cleaned)
+                        except ValueError:
+                            logging.warning(f"Placemark {i+1}: No se pudo convertir '{km_value_str_cleaned}' (obtenido de '{km_value_str}') a número KM desde el nombre '{nombre_completo_str}'. KM será NaN.")
+                            parsed_km = np.nan # Asegurar que sea NaN si falla conversión
+                    else:
+                        # Si " KM " no se encuentra, el nombre completo es el nombre, KM es NaN
+                        parsed_name = nombre_completo_str.strip()
+                        logging.warning(f"Placemark {i+1}: No se encontró ' KM ' en el nombre '{nombre_completo_str}'. KM será NaN.")
+                        parsed_km = np.nan # KM es NaN por defecto
+
+                except Exception as e:
+                     logging.error(f"Placemark {i+1}: Error inesperado al parsear Nombre/KM de '{nombre_completo_str}': {e}. KM será NaN.")
+                     parsed_name = nombre_completo_str.strip() # Usar el nombre completo como fallback
+                     parsed_km = np.nan # KM es NaN por defecto
+
+
+            # --- Parsear Coordenadas ---
+            if coords_tag is not None and coords_tag.text:
                 try:
-                    coords_str = coord_tag.text.strip()
-                    lon_str, lat_str, *alt_str = coords_str.split(',')
-                    lat = float(lat_str)
-                    lon = float(lon_str)
-                    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                    coords_str = coords_tag.text.strip()
+                    # Las coordenadas en KML suelen ser lon,lat,alt (separadas por coma)
+                    # Asegurarse de manejar comas como separador decimal si es el caso en la fuente original
+                    # Pero KML estándar usa punto para decimal. Asumimos KML estándar lon,lat,alt con punto decimal.
+                    partes_coord = coords_str.split(',')
+                    if len(partes_coord) >= 2:
+                        # Convertir lon y lat a float. KML usa punto decimal.
+                        lon = float(partes_coord[0].strip())
+                        lat = float(partes_coord[1].strip())
+
+                        # Validar rangos de lat/lon
+                        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                             logging.warning(f"Placemark {i+1}: Coordenadas fuera de rango para '{nombre_completo_str}': Lat={lat}, Lon={lon}. Lat/Lon será NaN.")
+                             lat = np.nan # Marcar como inválido
+                             lon = np.nan
+                    else:
+                         logging.warning(f"Placemark {i+1}: Formato de coordenadas inesperado '{coords_str}' para '{nombre_completo_str}'. Lat/Lon será NaN.")
                          lat = np.nan
                          lon = np.nan
 
                 except ValueError as ve:
+                     logging.warning(f"Placemark {i+1}: Error al convertir coordenadas a número para '{nombre_completo_str}' (coords: '{coords_str}'): {ve}. Lat/Lon será NaN.")
                      lat = np.nan
                      lon = np.nan
                 except Exception as e:
+                     logging.error(f"Placemark {i+1}: Error inesperado al procesar coordenadas para '{nombre_completo_str}' (coords: '{coords_str}'): {e}. Lat/Lon será NaN.")
                      lat = np.nan
                      lon = np.nan
 
-        if nombre and not (np.isnan(lat) or np.isnan(lon)):
-             datos.append({
-                 'Nombre': nombre_limpio if 'nombre_limpio' in locals() else nombre,
-                 'Km': km,
-                 'Lat': lat,
-                 'Lon': lon
-             })
+            # --- Añadir a la lista de datos ---
+            # Solo añadimos si se pudo obtener un nombre (aunque sea el nombre completo sin KM parseado)
+            # y si las coordenadas Lat/Lon son válidas (no NaN).
+            # El KM puede ser NaN si no se pudo parsear.
+            if parsed_name and not (np.isnan(lat) or np.isnan(lon)):
+                 datos.append({
+                     'Nombre': parsed_name, # Usar el nombre parseado
+                     'Km': parsed_km,      # Usar el KM parseado (puede ser NaN)
+                     'Lat': lat,
+                     'Lon': lon
+                 })
+            else:
+                 if nombre_completo_str: # Si había un nombre original, loguear por qué se saltó
+                      logging.warning(f"Placemark {i+1}: Saltando entrada KML para '{nombre_completo_str}' debido a nombre vacío o coordenadas inválidas/faltantes.")
 
-    return pd.DataFrame(datos)
+
+        logging.info(f"Procesamiento KML finalizado. Encontrados {len(datos)} puntos con nombre y coordenadas válidas.")
+        return pd.DataFrame(datos)
+
+    except Exception as e:
+        st.error(f"Error general al procesar el archivo KML: {e}")
+        logging.error(f"Error general al procesar el archivo KML: {e}", exc_info=True)
+        return pd.DataFrame() # Retornar DataFrame vacío en caso de error
 
 
 # --- Cargar archivo ---
@@ -103,41 +159,62 @@ df_estaciones = pd.DataFrame()
 if archivo_subido:
     if archivo_subido.name.endswith(".csv"):
         try:
+            # pandas read_csv puede leer directamente del objeto UploadedFile
             df_estaciones = pd.read_csv(archivo_subido)
         except Exception as e:
             st.error(f"Error al leer el archivo CSV: {e}")
+            logging.error(f"Error al leer el archivo CSV: {e}", exc_info=True)
             df_estaciones = pd.DataFrame()
 
     elif archivo_subido.name.endswith(".kml"):
         try:
-            kml_bytes = archivo_subido.getvalue()
+            # Leer el contenido del archivo subido a un buffer en memoria (BytesIO)
+            kml_bytes = archivo_subido.getvalue() # getvalue() obtiene los bytes del archivo
             kml_file_object = io.BytesIO(kml_bytes)
+            # Pasar el objeto BytesIO a procesar_kml
             df_estaciones = procesar_kml(kml_file_object)
         except Exception as e:
-            st.error(f"Error al procesar el archivo KML: {e}")
+            # Errores más específicos se loguean dentro de procesar_kml
+            st.error(f"Error al procesar el archivo KML.")
+            logging.error(f"Error al procesar el archivo KML: {e}", exc_info=True)
             df_estaciones = pd.DataFrame()
 
 
 # --- Validación y selección de subtramo ---
+# Verificar si el DataFrame no está vacío y tiene las columnas requeridas antes de cargarlas
+# La función cargar_estaciones también valida y limpia, pero esta es una pre-validación rápida.
+# Ahora, después de procesar KML, el DataFrame puede tener 'Km' como NaN. cargar_estaciones
+# eliminará las filas con Km=NaN.
 if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_estaciones.columns):
+    # Cargar y validar estaciones usando la función de script2
+    # Esta función ya limpia, valida y ordena, y retorna una lista de namedtuples
     try:
+        # cargar_estaciones eliminará las filas donde Km es NaN.
         estaciones_cargadas = script2.cargar_estaciones(df_estaciones)
+        # Convertir la lista de namedtuples a DataFrame para usar con selectbox/loc
+        # Las columnas serán 'nombre', 'km', 'lat', 'lon' (en minúscula)
         df_estaciones_ordenadas = pd.DataFrame([s._asdict() for s in estaciones_cargadas])
     except ValueError as e:
         st.error(f"Error en los datos de las estaciones: {e}")
-        st.stop()
+        logging.error(f"Error en los datos de las estaciones: {e}", exc_info=True)
+        st.stop() # Detener si los datos de entrada son inválidos
     except Exception as e:
         st.error(f"Error inesperado al cargar las estaciones: {e}")
+        logging.error(f"Error inesperado al cargar las estaciones: {e}", exc_info=True)
         st.stop()
+
 
     if df_estaciones_ordenadas.empty or len(df_estaciones_ordenadas) < 2:
-        st.error("❌ No hay suficientes estaciones válidas con datos completos (Nombre, Km, Lat, Lon) después de la limpieza y validación.")
+        st.error("❌ No hay suficientes estaciones válidas con datos completos (Nombre, Km, Lat, Lon) después de la limpieza y validación. Asegúrate de que los nombres en tu KML contengan el patrón ' KM ##.#' y que las coordenadas sean válidas.")
         st.stop()
 
-    nombres_estaciones = df_estaciones_ordenadas["nombre"].tolist() # Usar "nombre" en minúscula
+    # Ahora acceder a la columna 'nombre' en minúscula
+    nombres_estaciones = df_estaciones_ordenadas["nombre"].tolist()
 
     st.subheader("📍 Selección del tramo a visualizar")
 
+    # Usar índices para los selectbox es más seguro
+    # Encontrar el índice de la última estación para el valor por defecto del selectbox 'fin'
     default_index_fin = len(nombres_estaciones) - 1
     idx_est_inicio = st.selectbox("Estación inicial", options=range(len(nombres_estaciones)), format_func=lambda x: nombres_estaciones[x], index=0)
     idx_est_fin = st.selectbox("Estación final", options=range(len(nombres_estaciones)), format_func=lambda x: nombres_estaciones[x], index=default_index_fin)
@@ -145,14 +222,18 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
     est_inicio = nombres_estaciones[idx_est_inicio]
     est_fin = nombres_estaciones[idx_est_fin]
 
-    km_inicio = df_estaciones_ordenadas.loc[idx_est_inicio, "km"] # Usar "km" en minúscula
-    km_fin = df_estaciones_ordenadas.loc[idx_est_fin, "km"]     # Usar "km" en minúscula
+    # Acceder a la columna 'km' en minúscula
+    km_inicio = df_estaciones_ordenadas.loc[idx_est_inicio, "km"]
+    km_fin = df_estaciones_ordenadas.loc[idx_est_fin, "km"]
 
     if km_inicio >= km_fin:
         st.error("❌ La estación inicial debe tener un kilómetro menor que la final.")
         st.stop()
 
+    # Filtrar las estaciones cargadas (ya validadas y ordenadas) por el tramo seleccionado en base a su km
+    # Usar la lista original de namedtuples 'estaciones_cargadas' que está ordenada por km
     estaciones_tramo_list = [s for s in estaciones_cargadas if s.km >= km_inicio and s.km <= km_fin]
+
 
     if not estaciones_tramo_list:
          st.error("❌ El tramo seleccionado no contiene estaciones válidas.")
@@ -175,6 +256,7 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
                           help="Simula la posición actual en la vía.")
 
     km_actual = max(float(min_km_tramo), min(float(max_km_tramo), km_actual))
+
 
     max_workers = st.slider("👷‍♂️ Número de workers para consultas a la API", 1, 10, 2,
                             help="Cuantos más workers, más rápido será, pero aumenta el riesgo de que la API rechace las consultas (Error 429: Too Many Requests). Reducir este valor ayuda a evitar el error 429.")
@@ -204,6 +286,7 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
             except Exception as e:
                 progress_bar.empty()
                 st.error(f"Error al obtener elevaciones: {e}. Intenta reducir el número de workers.")
+                logging.error(f"Error al obtener elevaciones: {e}", exc_info=True)
                 puntos_con_elevacion = []
 
     else:
@@ -228,6 +311,7 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
                 pendientes_vis = script2.calcular_pendiente_suavizada(kms_vis, elevs_vis, window_length=window_length)
             except Exception as e:
                  st.error(f"Error al calcular la pendiente: {e}")
+                 logging.error(f"Error al calcular la pendiente: {e}", exc_info=True)
                  pendientes_vis = np.full_like(elevs_vis, np.nan, dtype=float)
 
         elif num_valid_vis > 1:
@@ -243,10 +327,10 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
                     puntos_visibles,
                     estaciones_tramo_list,
                     titulo=f"{est_inicio} - {est_fin} | Km actual: {km_actual:.3f}",
-                    slope_data_vis=pendientes_vis, # <-- CORRECCIÓN AQUÍ: Usar slope_data_vis
+                    slope_data_vis=pendientes_vis,
                     theme="dark",
                     colors="cyan,yellow",
-                    watermark="LAL"
+                    watermark="Perfil LAL 2025"
                 )
 
                 if fig:
@@ -257,6 +341,7 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
                      if not np.isfinite(y_max_vis): y_max_vis = 100
                      if y_min_vis == y_max_vis:
                           y_min_vis, y_max_vis = y_min_vis - 10, y_max_vis + 10
+
 
                      fig.add_shape(type='line', x0=km_actual, x1=km_actual,
                                    y0=y_min_vis, y1=y_max_vis,
@@ -282,6 +367,7 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
 
             except Exception as e:
                  st.error(f"Error al generar el gráfico: {e}")
+                 logging.error(f"Error al generar el gráfico: {e}", exc_info=True)
                  fig = None
 
         elif len(kms_vis) > 0:
@@ -301,6 +387,7 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
                     pendientes_completas = script2.calcular_pendiente_suavizada(kms_interp_arr, elevs_interp_arr, window_length=window_length)
                  except Exception as e:
                     st.warning(f"Error al calcular pendientes para la exportación CSV completa: {e}. La columna de pendiente en el CSV podría tener NaNs.")
+                    logging.error(f"Error al calcular pendientes para la exportación CSV completa: {e}", exc_info=True)
                     pendientes_completas = np.full_like(elevs_interp_arr, np.nan, dtype=float)
             elif num_valid_total > 1:
                  st.warning(f"No hay suficientes puntos interpolados totales válidos ({num_valid_total}) para calcular la pendiente con una ventana de {window_length} (se requieren al menos {window_length}). La columna de pendiente en el CSV estará vacía.")
@@ -314,6 +401,7 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
             )
         except Exception as e:
              st.error(f"Error al generar CSV: {e}")
+             logging.error(f"Error al generar CSV: {e}", exc_info=True)
 
         kml_buffer = io.BytesIO()
         try:
@@ -326,6 +414,8 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
             )
         except Exception as e:
              st.error(f"Error al generar KML: {e}")
+             logging.error(f"Error al generar KML: {e}", exc_info=True)
+
 
         geojson_buffer = io.StringIO()
         try:
@@ -338,6 +428,7 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
             )
         except Exception as e:
              st.error(f"Error al generar GeoJSON: {e}")
+             logging.error(f"Error al generar GeoJSON: {e}", exc_info=True)
 
         if fig:
             try:
@@ -351,6 +442,8 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
                 )
             except Exception as e:
                  st.error(f"Error al generar PDF del gráfico: {e}. Asegúrate de que la librería 'kaleido' esté instalada y funcionando en tu entorno Streamlit Cloud.")
+                 logging.error(f"Error al generar PDF del gráfico: {e}", exc_info=True)
+
 
     elif archivo_subido and df_estaciones.empty:
          pass
