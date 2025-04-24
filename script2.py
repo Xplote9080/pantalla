@@ -436,7 +436,13 @@ def calcular_pendiente_suavizada(kms: np.ndarray, elevs: np.ndarray, window_leng
 
     # Asumiendo que los puntos interpolados están casi uniformemente espaciados en KM:
     # Calcular la diferencia promedio entre los KM válidos (en metros)
-    delta_x_interp_valid = np.mean(np.diff(valid_kms_m))
+    # Usamos np.diff sobre los valid_kms_m para obtener diferencias solo entre puntos válidos
+    diffs_valid = np.diff(valid_kms_m)
+    if len(diffs_valid) > 0:
+        delta_x_interp_valid = np.mean(diffs_valid)
+    else:
+         # Si solo hay 1 o 0 puntos válidos, no se puede calcular delta
+         delta_x_interp_valid = 0
 
 
     if np.isclose(delta_x_interp_valid, 0) or np.isnan(delta_x_interp_valid):
@@ -584,11 +590,34 @@ def graficar_html(puntos_visibles: List[InterpolatedPoint], # Cambiado para reci
         # plot_bgcolor='black',  # Comentado para dejar que el template lo defina
 
         title=dict(text=titulo, x=0.5, xanchor='center', font=dict(size=18, color='white')),
-        xaxis=dict(title='Kilómetro', color='white', showgrid=True, gridcolor='rgba(128,128,128,0.2)', zeroline=False, hoverformat='.3f'),
-        yaxis=dict(title='Elevación (msnm)', tickfont=dict(color=elev_color), color='white', showgrid=True, gridcolor='rgba(128,128,128,0.2)', zeroline=False),
+        xaxis=dict(
+            title='Kilómetro',
+            color='white',
+            showgrid=True,
+            gridcolor='rgba(128,128,128,0.5)', # Color un poco más visible
+            griddash='dot', # <-- AÑADIDA CUADRÍCULA PUNTEADA EN X
+            gridwidth=1, # Ancho de la línea
+            zeroline=False,
+            hoverformat='.3f'
+        ),
+        yaxis=dict(
+            title='Elevación (msnm)',
+            tickfont=dict(color=elev_color),
+            color='white',
+            showgrid=True,
+            gridcolor='rgba(128,128,128,0.5)', # Color un poco más visible
+            griddash='dot', # <-- AÑADIDA CUADRÍCULA PUNTEADA EN Y
+            gridwidth=1, # Ancho de la línea
+            zeroline=False
+        ),
         yaxis2=dict(
-            title="Pendiente (m/km)", tickfont=dict(color=slope_color), color='white',
-            anchor="x", overlaying="y", side="right", showgrid=False # No mostrar grid para el eje secundario
+            title="Pendiente (m/km)",
+            tickfont=dict(color=slope_color),
+            color='white',
+            anchor="x",
+            overlaying="y",
+            side="right",
+            showgrid=False # No mostrar grid para el eje secundario
         ),
 
         hovermode="x unified", # Modo hover unificado
@@ -610,7 +639,7 @@ def exportar_kml(puntos_con_elevacion: List[InterpolatedPoint], estaciones_tramo
     for est in estaciones_tramo:
         # Intentar usar la elevación interpolada más cercana si está disponible
         closest_point = min(puntos_con_elevacion, key=lambda p: abs(p.km - est.km), default=None) if puntos_con_elevacion else None
-        elev = closest_point.elevation if closest_point and closest_point.elevation is not None else DEFAULT_ELEVATION_ON_ERROR
+        elev = closest_point.elevation if closest_point and closest_point.elevation is not None and np.isfinite(closest_point.elevation) else DEFAULT_ELEVATION_ON_ERROR # Verificar isfinite
         # Usar las coordenadas originales de la estación para el punto KML
         pnt = kml.newpoint(name=est.nombre, coords=[(est.lon, est.lat, elev)], altitudemode='absolute') # Usar altitudemode='absolute'
         pnt.description = f"Km: {est.km:.3f}, Elevación: {elev:.1f} m\n{author}"
@@ -648,7 +677,7 @@ def exportar_geojson(puntos_con_elevacion: List[InterpolatedPoint], estaciones_t
     features = []
     # Exportar puntos interpolados
     for p in puntos_con_elevacion:
-        elev = p.elevation if p.elevation is not None else DEFAULT_ELEVATION_ON_ERROR
+        elev = p.elevation if p.elevation is not None and np.isfinite(p.elevation) else DEFAULT_ELEVATION_ON_ERROR # Verificar isfinite
         features.append(Feature(
             geometry=Point((p.lon, p.lat)), # GeoJSON es lon, lat
             properties={"km": p.km, "elevation": elev, "type": "interpolated", "author": author}
@@ -657,7 +686,7 @@ def exportar_geojson(puntos_con_elevacion: List[InterpolatedPoint], estaciones_t
     for est in estaciones_tramo:
         # Intentar usar la elevación interpolada más cercana si está disponible
         closest_point = min(puntos_con_elevacion, key=lambda p: abs(p.km - est.km), default=None) if puntos_con_elevacion else None
-        elev = closest_point.elevation if closest_point and closest_point.elevation is not None else DEFAULT_ELEVATION_ON_ERROR
+        elev = closest_point.elevation if closest_point and closest_point.elevation is not None and np.isfinite(closest_point.elevation) else DEFAULT_ELEVATION_ON_ERROR # Verificar isfinite
         features.append(Feature(
             geometry=Point((est.lon, est.lat)), # Usar coords originales de la estación
             properties={"name": est.nombre, "km": est.km, "elevation": elev, "type": "station", "author": author}
@@ -705,11 +734,11 @@ def exportar_csv(puntos_con_elevacion: List[InterpolatedPoint], slope_data: np.n
         writer.writerow(header)
 
         for i, p in enumerate(puntos_con_elevacion):
-            elev = p.elevation if p.elevation is not None else DEFAULT_ELEVATION_ON_ERROR
+            elev = p.elevation if p.elevation is not None and np.isfinite(p.elevation) else DEFAULT_ELEVATION_ON_ERROR # Verificar isfinite
             row = [p.km, p.lat, p.lon, elev]
             if has_slope:
                  # Asegurarse de que el índice de slope_data sea válido antes de acceder
-                 slope = slope_data[i] if i < len(slope_data) and not np.isnan(slope_data[i]) else '' # Usar cadena vacía para NaN en CSV
+                 slope = slope_data[i] if i < len(slope_data) and np.isfinite(slope_data[i]) else '' # Usar cadena vacía para NaN en CSV
                  row.append(slope)
             writer.writerow(row)
         # logging.info("CSV data generated.") # No loguear en bucle
