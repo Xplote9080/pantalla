@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 import io # Importar io para manejar buffers
 
 # Importar el módulo script2 completo
-import script2 # <-- CAMBIO AQUÍ: Importa el módulo completo
+import script2
 
 # Ahora puedes acceder a las funciones y variables de script2 usando script2.nombre
 # Por ejemplo: script2.cargar_estaciones, script2._cache, etc.
@@ -33,14 +33,14 @@ También podés elegir un subtramo del archivo y cuántos *workers* usar para co
 def initialize_elevation_cache():
     """Inicializa y carga el caché de elevaciones usando la función del script2."""
     # Llamar a la función de script2 para cargar el caché
-    cache_dict = script2.load_cache_to_memory() # <-- CAMBIO AQUÍ: Usar script2.
+    cache_dict = script2.load_cache_to_memory()
     return cache_dict
 
 # Llamar para inicializar el caché y asignarlo a la variable global en script2
 # Esto es crucial para que las funciones de script2 (_load_elevation_from_cache, _save_elevation_to_cache)
 # operen sobre la misma instancia del caché cargado por Streamlit.
 # La variable global _cache en script2 ahora apunta al mismo objeto que initialize_elevation_cache retorna.
-script2._cache = initialize_elevation_cache() # <-- ESTA LÍNEA AHORA FUNCIONARÁ
+script2._cache = initialize_elevation_cache()
 
 
 # --- Procesar KML ---
@@ -112,10 +112,11 @@ def procesar_kml(kml_file_object):
 
         # Añadir datos si al menos el Nombre es válido y las coordenadas son válidas
         # No añadimos si KM es NaN, ya que es crucial para la interpolación
+        # Pero la limpieza final de filas con NaN se hace en cargar_estaciones
         if nombre and not (np.isnan(lat) or np.isnan(lon)):
              datos.append({
                  'Nombre': nombre_limpio if 'nombre_limpio' in locals() else nombre, # Usar limpio si se hizo split
-                 'Km': km, # Incluir Km aunque sea NaN por ahora, la limpieza final se hace en cargar_estaciones
+                 'Km': km, # Incluir Km aunque sea NaN por ahora
                  'Lat': lat,
                  'Lon': lon
              })
@@ -152,13 +153,16 @@ if archivo_subido:
 
 
 # --- Validación y selección de subtramo ---
-# Verificar si el DataFrame no está vacío y tiene las columnas requeridas
+# Verificar si el DataFrame no está vacío y tiene las columnas requeridas antes de cargarlas
+# La función cargar_estaciones también valida y limpia, pero esta es una pre-validación rápida.
 if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_estaciones.columns):
     # Cargar y validar estaciones usando la función de script2
-    # Esta función ya limpia, valida y ordena
+    # Esta función ya limpia, valida y ordena, y retorna una lista de namedtuples
     try:
-        estaciones_cargadas = script2.cargar_estaciones(df_estaciones) # <-- CAMBIO AQUÍ: Usar script2.
-        df_estaciones_ordenadas = pd.DataFrame([s._asdict() for s in estaciones_cargadas]) # Convertir de nuevo a DF para selectbox
+        estaciones_cargadas = script2.cargar_estaciones(df_estaciones)
+        # Convertir la lista de namedtuples a DataFrame para usar con selectbox/loc
+        # Las columnas serán 'nombre', 'km', 'lat', 'lon' (en minúscula)
+        df_estaciones_ordenadas = pd.DataFrame([s._asdict() for s in estaciones_cargadas])
     except ValueError as e:
         st.error(f"Error en los datos de las estaciones: {e}")
         st.stop() # Detener si los datos de entrada son inválidos
@@ -171,7 +175,8 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
         st.error("❌ No hay suficientes estaciones válidas con datos completos (Nombre, Km, Lat, Lon) después de la limpieza y validación.")
         st.stop()
 
-    nombres_estaciones = df_estaciones_ordenadas["Nombre"].tolist()
+    # Ahora acceder a la columna 'nombre' en minúscula
+    nombres_estaciones = df_estaciones_ordenadas["nombre"].tolist() # <-- CORRECCIÓN AQUÍ: "nombre" en minúscula
 
     st.subheader("📍 Selección del tramo a visualizar")
 
@@ -184,14 +189,16 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
     est_inicio = nombres_estaciones[idx_est_inicio]
     est_fin = nombres_estaciones[idx_est_fin]
 
-    km_inicio = df_estaciones_ordenadas.loc[idx_est_inicio, "Km"]
-    km_fin = df_estaciones_ordenadas.loc[idx_est_fin, "Km"]
+    # Acceder a la columna 'km' en minúscula
+    km_inicio = df_estaciones_ordenadas.loc[idx_est_inicio, "km"] # <-- CORRECCIÓN AQUÍ: "km" en minúscula
+    km_fin = df_estaciones_ordenadas.loc[idx_est_fin, "km"]     # <-- CORRECCIÓN AQUÍ: "km" en minúscula
 
     if km_inicio >= km_fin:
         st.error("❌ La estación inicial debe tener un kilómetro menor que la final.")
         st.stop()
 
-    # Filtrar las estaciones cargadas (ya validadas y ordenadas) por el tramo seleccionado
+    # Filtrar las estaciones cargadas (ya validadas y ordenadas) por el tramo seleccionado en base a su km
+    # Usar la lista original de namedtuples 'estaciones_cargadas' que está ordenada por km
     estaciones_tramo_list = [s for s in estaciones_cargadas if s.km >= km_inicio and s.km <= km_fin]
 
 
@@ -233,7 +240,7 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
 
     # --- Procesamiento de Datos ---
     # La interpolación se hace sobre la lista de estaciones del tramo
-    puntos_interp = script2.interpolar_puntos(estaciones_tramo_list, intervalo_m=intervalo) # <-- CAMBIO AQUÍ: Usar script2.
+    puntos_interp = script2.interpolar_puntos(estaciones_tramo_list, intervalo_m=intervalo)
 
 
     # Usar un spinner y progress bar para mostrar que se está procesando
@@ -242,7 +249,7 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
         with st.spinner(f"Consultando elevaciones para {len(puntos_interp)} puntos (puede tomar tiempo)..."):
             progress_bar = st.progress(0)
             try:
-                puntos_con_elevacion = script2.obtener_elevaciones_paralelo( # <-- CAMBIO AQUÍ: Usar script2.
+                puntos_con_elevacion = script2.obtener_elevaciones_paralelo(
                     puntos_interp,
                     author="LAL", # Pasa tu autor
                     progress_callback=lambda p: progress_bar.progress(p), # Lambda para pasar el valor de progreso
@@ -263,118 +270,138 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
 
 
     # --- Preparar datos para visualización ---
-    kms_interp_arr = np.array([p.km for p in puntos_con_elevacion])
-    # Convertir la lista de puntos con elevación (que puede tener None) a array numpy con NaN
-    elevs_interp_arr = np.array([p.elevation if p.elevation is not None else np.nan for p in puntos_con_elevacion], dtype=float)
+    # Solo proceder si se obtuvieron puntos con elevación
+    if puntos_con_elevacion:
+        kms_interp_arr = np.array([p.km for p in puntos_con_elevacion])
+        # Convertir la lista de puntos con elevación (que puede tener None) a array numpy con NaN
+        elevs_interp_arr = np.array([p.elevation if p.elevation is not None else np.nan for p in puntos_con_elevacion], dtype=float)
 
-    # Filtrar puntos_con_elevacion por la ventana visible alrededor de km_actual
-    mask_visible = (kms_interp_arr >= km_actual - ventana_km) & (kms_interp_arr <= km_actual + ventana_km)
-    kms_vis = kms_interp_arr[mask_visible]
-    elevs_vis = elevs_interp_arr[mask_visible]
-    # Filtrar los puntos con elevación también para calcular la pendiente solo sobre los visibles
-    # Necesitamos los objetos Point completos para los hover texts más adelante
-    puntos_visibles = [puntos_con_elevacion[i] for i in range(len(puntos_con_elevacion)) if mask_visible[i]]
-
-
-    # Calcular pendiente solo para los puntos visibles, usando el slider window_length
-    pendientes_vis = np.full_like(elevs_vis, np.nan, dtype=float) # Inicializar con NaNs
-    if len(kms_vis) >= window_length and window_length >= 3: # Asegurarse de tener suficientes puntos válidos para el filtro (>= window_length)
-        # calcular_pendiente_suavizada espera arrays de numpy
-        try:
-            pendientes_vis = script2.calcular_pendiente_suavizada(kms_vis, elevs_vis, window_length=window_length) # <-- CAMBIO AQUÍ: Usar script2.
-        except Exception as e:
-             st.error(f"Error al calcular la pendiente: {e}")
-             pendientes_vis = np.full_like(elevs_vis, np.nan, dtype=float) # Si falla, dejar NaNs
-
-    elif len(kms_vis) > 1: # Si hay puntos pero no suficientes para el filtro con la ventana elegida
-         st.warning(f"No hay suficientes puntos visibles ({len(kms_vis)}) para calcular la pendiente con una ventana de {window_length} (se requieren al menos {window_length}). Se mostrará el gráfico sin pendiente suavizada en el rango visible.")
+        # Filtrar puntos_con_elevacion por la ventana visible alrededor de km_actual
+        mask_visible = (kms_interp_arr >= km_actual - ventana_km) & (kms_interp_arr <= km_actual + ventana_km)
+        kms_vis = kms_interp_arr[mask_visible]
+        elevs_vis = elevs_interp_arr[mask_visible]
+        # Filtrar los puntos con elevación también para calcular la pendiente solo sobre los visibles
+        # Necesitamos los objetos Point completos para los hover texts más adelante
+        puntos_visibles = [puntos_con_elevacion[i] for i in range(len(puntos_con_elevacion)) if mask_visible[i]]
 
 
-    # --- Generar Gráfico ---
-    st.subheader("📊 Perfil Altimétrico Visible")
+        # Calcular pendiente solo para los puntos visibles, usando el slider window_length
+        pendientes_vis = np.full_like(elevs_vis, np.nan, dtype=float) # Inicializar con NaNs
+        # Asegurarse de tener suficientes puntos válidos para el filtro Savitzky-Golay
+        # El número de puntos válidos es len(kms_vis) si no hay NaNs en elevs_vis
+        num_valid_vis = np.count_nonzero(~np.isnan(elevs_vis))
 
-    fig = None # Inicializar la figura a None
-    if len(kms_vis) > 1: # Asegurarse de tener al menos 2 puntos visibles para dibujar la línea
-        # Generar la figura Plotly usando la función de script2
-        try:
-            # Pasar los datos visibles y las estaciones del tramo
-            fig = script2.graficar_html( # <-- CAMBIO AQUÍ: Usar script2.
-                puntos_visibles, # Pasar solo los puntos visibles para el gráfico
-                estaciones_tramo_list, # Pasar todas las estaciones del tramo para marcadores
-                titulo=f"{est_inicio} - {est_fin} | Km actual: {km_actual:.3f}",
-                slope_data=pendientes_vis, # Pasar las pendientes calculadas para los puntos visibles
-                theme="dark", # Usar tema oscuro
-                colors="cyan,yellow", # Colores para elevación y pendiente
-                watermark="Perfil LAL 2025" # Marca de agua
-            )
+        if num_valid_vis >= window_length and window_length >= 3:
+            try:
+                # calcular_pendiente_suavizada espera arrays de numpy
+                pendientes_vis = script2.calcular_pendiente_suavizada(kms_vis, elevs_vis, window_length=window_length)
+            except Exception as e:
+                 st.error(f"Error al calcular la pendiente: {e}")
+                 pendientes_vis = np.full_like(elevs_vis, np.nan, dtype=float) # Si falla, dejar NaNs
 
-            # Añadir la marca de posición actual al gráfico generado
-            # Es mejor añadir esto aquí en la UI script
-            if fig: # Asegurarse de que la figura se generó
-                 # Calcular min/max Y del gráfico visible para la línea vertical
-                 # Usar np.nanmin/nanmax para ignorar NaNs
-                 y_min_vis = np.nanmin(elevs_vis) if not np.all(np.isnan(elevs_vis)) else 0
-                 y_max_vis = np.nanmax(elevs_vis) if not np.all(np.isnan(elevs_vis)) else 100
-
-                 # Asegurarse de que y_min/max sean números válidos y no infinitos
-                 if not np.isfinite(y_min_vis): y_min_vis = 0
-                 if not np.isfinite(y_max_vis): y_max_vis = 100
-                 if y_min_vis == y_max_vis: # Evitar línea si min y max son iguales
-                      y_min_vis, y_max_vis = y_min_vis - 10, y_max_vis + 10 # Dar un pequeño rango
+        elif num_valid_vis > 1: # Si hay puntos válidos pero no suficientes para la ventana elegida
+             st.warning(f"No hay suficientes puntos visibles válidos ({num_valid_vis}) para calcular la pendiente con una ventana de {window_length} (se requieren al menos {window_length}). Se mostrará el gráfico sin pendiente suavizada en el rango visible.")
+        # else: # num_valid_vis <= 1, pendientes_vis ya es NaNs
 
 
-                 fig.add_shape(type='line', x0=km_actual, x1=km_actual,
-                               y0=y_min_vis, y1=y_max_vis, # Usar min/max de las elevaciones visibles
-                               line=dict(color='red', width=3, dash='dot'),
-                               name=f"Km actual: {km_actual:.3f}", # Nombre para hover
-                               xref='x', yref='y') # Referenciar a los ejes de datos
+        # --- Generar Gráfico ---
+        st.subheader("📊 Perfil Altimétrico Visible")
 
-                 # Mostrar el gráfico en Streamlit
-                 st.plotly_chart(fig, use_container_width=True)
+        fig = None # Inicializar la figura a None
+        if len(kms_vis) > 1: # Asegurarse de tener al menos 2 puntos visibles para dibujar la línea
+            # Generar la figura Plotly usando la función de script2
+            try:
+                # Pasar los datos visibles y las estaciones del tramo
+                fig = script2.graficar_html(
+                    puntos_visibles, # Pasar solo los puntos visibles para el gráfico
+                    estaciones_tramo_list, # Pasar todas las estaciones del tramo para marcadores
+                    titulo=f"{est_inicio} - {est_fin} | Km actual: {km_actual:.3f}",
+                    slope_data=pendientes_vis, # Pasar las pendientes calculadas para los puntos visibles
+                    theme="dark", # Usar tema oscuro
+                    colors="cyan,yellow", # Colores para elevación y pendiente
+                    watermark="Perfil LAL 2025" # Marca de agua
+                )
 
-        except Exception as e:
-             st.error(f"Error al generar el gráfico: {e}")
-             fig = None # Asegurarse de que fig es None si falla
+                # Añadir la marca de posición actual al gráfico generado
+                # Es mejor añadir esto aquí en la UI script
+                if fig: # Asegurarse de que la figura se generó
+                     # Calcular min/max Y del gráfico visible para la línea vertical
+                     # Usar np.nanmin/nanmax para ignorar NaNs
+                     y_min_vis = np.nanmin(elevs_vis) if not np.all(np.isnan(elevs_vis)) else 0
+                     y_max_vis = np.nanmax(elevs_vis) if not np.all(np.isnan(elevs_vis)) else 100
+
+                     # Asegurarse de que y_min/max sean números válidos y no infinitos
+                     if not np.isfinite(y_min_vis): y_min_vis = 0
+                     if not np.isfinite(y_max_vis): y_max_vis = 100
+                     if y_min_vis == y_max_vis: # Evitar línea si min y max son iguales
+                          y_min_vis, y_max_vis = y_min_vis - 10, y_max_vis + 10 # Dar un pequeño rango
 
 
-    elif len(kms_vis) > 0:
-         st.warning("Se cargó el tramo, pero solo hay un punto visible en el rango actual para graficar una línea.")
-    else:
-        st.warning("No hay puntos interpolados ni datos visibles en el rango seleccionado para graficar.")
+                     fig.add_shape(type='line', x0=km_actual, x1=km_actual,
+                                   y0=y_min_vis, y1=y_max_vis, # Usar min/max de las elevaciones visibles
+                                   line=dict(color='red', width=3, dash='dot'),
+                                   name=f"Km actual: {km_actual:.3f}", # Nombre para hover
+                                   xref='x', yref='y') # Referenciar a los ejes de datos
+
+                     # Añadir anotaciones de pendiente si existen
+                     if len(kms_vis) > 1 and len(pendientes_vis) > 0:
+                         # Filtrar NaNs en pendientes_vis para anotaciones
+                         valid_slope_indices = ~np.isnan(pendientes_vis)
+                         kms_vis_valid_slope = kms_vis[valid_slope_indices]
+                         elevs_vis_valid_slope = elevs_vis[valid_slope_indices] # Usar elevaciones donde la pendiente es válida
+                         pendientes_vis_valid = pendientes_vis[valid_slope_indices]
+
+                         # Añadir anotaciones solo para puntos con pendiente válida
+                         if len(kms_vis_valid_slope) > 0:
+                             # Podrías añadir anotaciones en un subconjunto de puntos si hay muchos
+                             # Por ejemplo, cada N puntos o solo en cambios significativos.
+                             # Para simplificar, añadimos en todos los puntos con pendiente válida.
+                             for i in range(len(kms_vis_valid_slope)):
+                                 # Asegurarse de que las coordenadas de la anotación estén dentro de los límites visibles del gráfico si es necesario
+                                 fig.add_annotation(x=kms_vis_valid_slope[i],
+                                                    y=elevs_vis_valid_slope[i] + 5, # Ajustar posición Y (ej. 5 metros por encima)
+                                                    text=f"{pendientes_vis_valid[i]:+.1f}",
+                                                    showarrow=False, font=dict(size=12, color='yellow'),
+                                                    yanchor="bottom") # Anclar texto debajo del punto
+
+
+                     # Mostrar el gráfico en Streamlit
+                     st.plotly_chart(fig, use_container_width=True)
+
+            except Exception as e:
+                 st.error(f"Error al generar el gráfico: {e}")
+                 fig = None # Asegurarse de que fig es None si falla
+
+
+        elif len(kms_vis) > 0:
+             st.warning("Se cargó el tramo, pero solo hay un punto visible en el rango actual para graficar una línea.")
+        else:
+            st.warning("No hay puntos interpolados ni datos visibles en el rango seleccionado para graficar.")
 
 
     # --- Sección de Exportación ---
-    # Mostrar la sección de exportación solo si se generaron puntos con elevación
+    # Mostrar la sección de exportación solo si se obtuvieron puntos con elevación
     if puntos_con_elevacion:
         st.subheader("💾 Exportar Datos y Gráfico")
 
         # Botón para exportar CSV
         csv_buffer = io.StringIO() # Buffer para datos de texto
         try:
-            # Usar todos los puntos con elevación para la exportación completa
-            # Necesitamos las pendientes para todos los puntos también si queremos incluirlas
-            # Si solo calculaste pendientes para los puntos visibles, pásalas. Si no, pasa NaNs para el resto.
-            # Para simplificar, exportamos todos los puntos con su elevación, y si la pendiente
-            # se calculó para esos puntos (ej. si ventana_km es grande o todo el tramo), se incluirá.
-            # Si solo se calculó para visibles, los puntos fuera de la ventana visible tendrán NaN en CSV de pendiente.
-            # Aquí, pasamos las pendientes visibles, asumiendo que son suficientes o se mapearán correctamente
-            # a los puntos interpolados completos dentro de exportar_csv si es necesario.
-            # Una forma más robusta sería calcular pendientes para *todos* los puntos interpolados
-            # si la ventana de suavizado lo permite, no solo los visibles.
-            # Por ahora, pasamos los puntos_con_elevacion completos y las pendientes_vis.
-            # Modificamos exportar_csv para manejar esto.
-            # O, calculamos pendientes para todos los puntos interpolados AQUI antes de filtrar para graficar.
-            # Vamos a calcular pendientes para todos los puntos interpolados si es posible.
+            # Calcular pendientes para *todos* los puntos interpolados para la exportación CSV completa
             pendientes_completas = np.full_like(elevs_interp_arr, np.nan, dtype=float)
-            if len(kms_interp_arr) >= window_length and window_length >= 3:
+            # Calcular si hay suficientes puntos interpolados totales para la ventana de suavizado
+            num_valid_total = np.count_nonzero(~np.isnan(elevs_interp_arr))
+            if num_valid_total >= window_length and window_length >= 3:
                  try:
                     pendientes_completas = script2.calcular_pendiente_suavizada(kms_interp_arr, elevs_interp_arr, window_length=window_length)
                  except Exception as e:
                     st.warning(f"Error al calcular pendientes para la exportación CSV completa: {e}. La columna de pendiente en el CSV podría tener NaNs.")
                     pendientes_completas = np.full_like(elevs_interp_arr, np.nan, dtype=float)
+            elif num_valid_total > 1:
+                 st.warning(f"No hay suficientes puntos interpolados totales válidos ({num_valid_total}) para calcular la pendiente con una ventana de {window_length} (se requieren al menos {window_length}). La columna de pendiente en el CSV estará vacía.")
 
 
-            script2.exportar_csv(puntos_con_elevacion, pendientes_completas, csv_buffer, author="LAL") # <-- CAMBIO AQUÍ: Usar script2. y pendientes_completas
+            script2.exportar_csv(puntos_con_elevacion, pendientes_completas, csv_buffer, author="LAL")
             st.download_button(
                 label="💾 Descargar Datos CSV (Todos los puntos)",
                 data=csv_buffer.getvalue(),
@@ -387,9 +414,8 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
         # Botón para exportar KML
         kml_buffer = io.BytesIO() # Buffer para datos binarios
         try:
-            # exportar_kml ahora acepta el buffer directamente (usando tempfile internamente)
-            # KML exporta estaciones con elevación interpolada más cercana
-            script2.exportar_kml(puntos_con_elevacion, estaciones_tramo_list, kml_buffer, author="LAL") # <-- CAMBIO AQUÍ: Usar script2.
+            # exportar_kml exporta estaciones con elevación interpolada más cercana
+            script2.exportar_kml(puntos_con_elevacion, estaciones_tramo_list, kml_buffer, author="LAL")
             st.download_button(
                 label="💾 Descargar KML (Estaciones)",
                 data=kml_buffer.getvalue(),
@@ -403,9 +429,8 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
         # Botón para exportar GeoJSON
         geojson_buffer = io.StringIO() # Buffer para datos de texto
         try:
-            # exportar_geojson ahora acepta el buffer directamente
-            # Exporta puntos interpolados y estaciones
-            script2.exportar_geojson(puntos_con_elevacion, estaciones_tramo_list, geojson_buffer, author="LAL") # <-- CAMBIO AQUÍ: Usar script2.
+            # exportar_geojson exporta puntos interpolados y estaciones
+            script2.exportar_geojson(puntos_con_elevacion, estaciones_tramo_list, geojson_buffer, author="LAL")
             st.download_button(
                 label="💾 Descargar GeoJSON (Puntos y Estaciones)",
                 data=geojson_buffer.getvalue(),
@@ -419,9 +444,8 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
         # Este botón solo está disponible si el gráfico se generó (if fig:)
         if fig:
             try:
-                # exportar_pdf ahora acepta el buffer directamente
                 pdf_buffer = io.BytesIO()
-                script2.exportar_pdf(fig, pdf_buffer) # <-- CAMBIO AQUÍ: Usar script2.
+                script2.exportar_pdf(fig, pdf_buffer)
                 st.download_button(
                     label="💾 Descargar Gráfico PDF",
                     data=pdf_buffer.getvalue(),
