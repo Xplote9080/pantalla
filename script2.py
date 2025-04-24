@@ -222,7 +222,10 @@ def _fetch_elevation_batch_from_api(batch_coords: List[tuple[float, float]], tim
         logging.error(f"Request failed for batch (first point: {lats[0]}, {lons[0]}): {e}")
         raise
 
-def obtener_elevaciones_paralelo(puntos: List[InterpolatedPoint], author: str = AUTHOR_ATTRIBUTION, progress_callback: Optional[callable] = None) -> List[InterpolatedPoint]:
+def obtener_elevaciones_paralelo(puntos: List[InterpolatedPoint],
+                                  author: str = AUTHOR_ATTRIBUTION,
+                                  progress_callback: Optional[callable] = None,
+                                  max_workers: int = 4) -> List[InterpolatedPoint]:
     """Obtiene elevaciones usando caché y API por lotes en paralelo."""
     if not puntos:
         return []
@@ -254,7 +257,7 @@ def obtener_elevaciones_paralelo(puntos: List[InterpolatedPoint], author: str = 
         batches.append((batch_coords, batch_indices))
 
     processed_count = 0
-    with ThreadPoolExecutor(max_workers=MAX_API_WORKERS) as executor:
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(_fetch_elevation_batch_from_api, coords): (coords, indices) for coords, indices in batches}
         for future in as_completed(futures):
             coords, indices = futures[future]
