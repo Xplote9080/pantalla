@@ -3,23 +3,15 @@ import numpy as np
 import plotly.graph_objects as go
 import pandas as pd
 # import tempfile # Ya no es necesario para KML upload, pero puede ser para exportaciones si las funciones no aceptan buffers
-import os # Aún necesario para manejar tempfiles si se usan para exportación
+import os # Aún necesario para manejar tempfiles si se usan para exportación KML
 import xml.etree.ElementTree as ET
 import io # Importar io para manejar buffers
 
-# Importar todas las funciones necesarias, incluyendo las de exportación
-from script2 import (
-    cargar_estaciones,
-    interpolar_puntos,
-    obtener_elevaciones_paralelo,
-    calcular_pendiente_suavizada,
-    load_cache_to_memory, # Importar la función de carga de caché
-    _cache, # Importar la variable global del caché (para asignarla)
-    exportar_kml, # Importar funciones de exportación
-    exportar_geojson,
-    exportar_csv,
-    exportar_pdf
-)
+# Importar el módulo script2 completo
+import script2 # <-- CAMBIO AQUÍ: Importa el módulo completo
+
+# Ahora puedes acceder a las funciones y variables de script2 usando script2.nombre
+# Por ejemplo: script2.cargar_estaciones, script2._cache, etc.
 
 st.set_page_config(page_title="Pantalla Cabina", layout="wide")
 st.title("🚆 Vista estilo cabina - Perfil altimétrico en tiempo real")
@@ -40,14 +32,15 @@ También podés elegir un subtramo del archivo y cuántos *workers* usar para co
 @st.cache_resource
 def initialize_elevation_cache():
     """Inicializa y carga el caché de elevaciones usando la función del script2."""
-    # La función load_cache_to_memory carga desde el archivo si existe y retorna el dict.
-    cache_dict = load_cache_to_memory()
+    # Llamar a la función de script2 para cargar el caché
+    cache_dict = script2.load_cache_to_memory() # <-- CAMBIO AQUÍ: Usar script2.
     return cache_dict
 
 # Llamar para inicializar el caché y asignarlo a la variable global en script2
 # Esto es crucial para que las funciones de script2 (_load_elevation_from_cache, _save_elevation_to_cache)
 # operen sobre la misma instancia del caché cargado por Streamlit.
-script2._cache = initialize_elevation_cache()
+# La variable global _cache en script2 ahora apunta al mismo objeto que initialize_elevation_cache retorna.
+script2._cache = initialize_elevation_cache() # <-- ESTA LÍNEA AHORA FUNCIONARÁ
 
 
 # --- Procesar KML ---
@@ -56,6 +49,8 @@ def procesar_kml(kml_file_object):
     ns = {'kml': 'http://www.opengis.net/kml/2.2'}
     # ET.parse puede leer de un objeto tipo file
     try:
+        # Reset the buffer position to the beginning in case it was read before
+        kml_file_object.seek(0)
         tree = ET.parse(kml_file_object)
     except Exception as e:
          st.error(f"Error al parsear el archivo KML. Asegúrate de que sea un archivo KML válido: {e}")
@@ -86,7 +81,7 @@ def procesar_kml(kml_file_object):
                 try:
                     km = float(km_str)
                 except ValueError:
-                    st.warning(f"No se pudo parsear KM de '{km_str}' en '{nombre}'. Fila marcada con KM inválido.")
+                    # st.warning(f"No se pudo parsear KM de '{km_str}' en '{nombre}'. Fila marcada con KM inválido.")
                     km = np.nan # Marcar como inválido si falla
 
             # Procesar coordenadas si existen
@@ -100,33 +95,32 @@ def procesar_kml(kml_file_object):
                     # alt = float(alt_str[0]) if alt_str else np.nan # Opcional: leer altitud si existe
                     # Validar rangos de lat/lon
                     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
-                         st.warning(f"Coordenadas fuera de rango para '{nombre}': Lat={lat}, Lon={lon}. Fila marcada con Lat/Lon inválido.")
+                         # st.warning(f"Coordenadas fuera de rango para '{nombre}': Lat={lat}, Lon={lon}. Fila marcada con Lat/Lon inválido.")
                          lat = np.nan # Marcar como inválido
                          lon = np.nan
 
 
                 except ValueError as ve:
-                     st.warning(f"Error al parsear coordenadas '{coords_str}' para '{nombre}': {ve}. Fila marcada con Lat/Lon inválido.")
+                     # st.warning(f"Error al parsear coordenadas '{coords_str}' para '{nombre}': {ve}. Fila marcada con Lat/Lon inválido.")
                      lat = np.nan # Marcar como inválido
                      lon = np.nan
                 except Exception as e:
-                     st.warning(f"Error inesperado al procesar coordenadas para '{nombre}': {e}. Fila marcada con Lat/Lon inválido.")
+                     # st.warning(f"Error inesperado al procesar coordenadas para '{nombre}': {e}. Fila marcada con Lat/Lon inválido.")
                      lat = np.nan # Marcar como inválido
                      lon = np.nan
 
 
-        # Añadir datos si al menos el Nombre es válido
-        if nombre and not (np.isnan(km) or np.isnan(lat) or np.isnan(lon)):
-            datos.append({
-                'Nombre': nombre_limpio if 'nombre_limpio' in locals() else nombre, # Usar limpio si se hizo split
-                'Km': km,
-                'Lat': lat,
-                'Lon': lon
-            })
-        else:
-             if nombre: # Si al menos hay nombre, loguear por qué se saltó
-                st.warning(f"Saltando entrada KML para '{nombre}' debido a datos faltantes o inválidos (Km, Lat, Lon).")
-             # else: entrada completamente vacía, ignorar silenciosamente
+        # Añadir datos si al menos el Nombre es válido y las coordenadas son válidas
+        # No añadimos si KM es NaN, ya que es crucial para la interpolación
+        if nombre and not (np.isnan(lat) or np.isnan(lon)):
+             datos.append({
+                 'Nombre': nombre_limpio if 'nombre_limpio' in locals() else nombre, # Usar limpio si se hizo split
+                 'Km': km, # Incluir Km aunque sea NaN por ahora, la limpieza final se hace en cargar_estaciones
+                 'Lat': lat,
+                 'Lon': lon
+             })
+        # else: entrada completamente vacía o sin nombre, ignorar silenciosamente
+
 
     return pd.DataFrame(datos)
 
@@ -163,7 +157,7 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
     # Cargar y validar estaciones usando la función de script2
     # Esta función ya limpia, valida y ordena
     try:
-        estaciones_cargadas = cargar_estaciones(df_estaciones)
+        estaciones_cargadas = script2.cargar_estaciones(df_estaciones) # <-- CAMBIO AQUÍ: Usar script2.
         df_estaciones_ordenadas = pd.DataFrame([s._asdict() for s in estaciones_cargadas]) # Convertir de nuevo a DF para selectbox
     except ValueError as e:
         st.error(f"Error en los datos de las estaciones: {e}")
@@ -239,15 +233,16 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
 
     # --- Procesamiento de Datos ---
     # La interpolación se hace sobre la lista de estaciones del tramo
-    puntos_interp = interpolar_puntos(estaciones_tramo_list, intervalo_m=intervalo)
+    puntos_interp = script2.interpolar_puntos(estaciones_tramo_list, intervalo_m=intervalo) # <-- CAMBIO AQUÍ: Usar script2.
 
 
     # Usar un spinner y progress bar para mostrar que se está procesando
+    puntos_con_elevacion = [] # Inicializar aquí para asegurar que la variable existe
     if puntos_interp:
         with st.spinner(f"Consultando elevaciones para {len(puntos_interp)} puntos (puede tomar tiempo)..."):
             progress_bar = st.progress(0)
             try:
-                puntos_con_elevacion = obtener_elevaciones_paralelo(
+                puntos_con_elevacion = script2.obtener_elevaciones_paralelo( # <-- CAMBIO AQUÍ: Usar script2.
                     puntos_interp,
                     author="LAL", # Pasa tu autor
                     progress_callback=lambda p: progress_bar.progress(p), # Lambda para pasar el valor de progreso
@@ -261,44 +256,51 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
                 st.error(f"Error al obtener elevaciones: {e}. Intenta reducir el número de workers.")
                 puntos_con_elevacion = [] # Asegurarse de que esté vacío si falla
 
+
     else:
         st.warning("No se generaron puntos para consultar elevación con el intervalo y tramo seleccionados.")
         puntos_con_elevacion = []
 
 
     # --- Preparar datos para visualización ---
-    if puntos_con_elevacion:
-        kms_interp_arr = np.array([p.km for p in puntos_con_elevacion])
-        # Convertir la lista de puntos con elevación (que puede tener None) a array numpy con NaN
-        elevs_interp_arr = np.array([p.elevation if p.elevation is not None else np.nan for p in puntos_con_elevacion], dtype=float)
+    kms_interp_arr = np.array([p.km for p in puntos_con_elevacion])
+    # Convertir la lista de puntos con elevación (que puede tener None) a array numpy con NaN
+    elevs_interp_arr = np.array([p.elevation if p.elevation is not None else np.nan for p in puntos_con_elevacion], dtype=float)
 
-        # Filtrar puntos_con_elevacion por la ventana visible alrededor de km_actual
-        mask_visible = (kms_interp_arr >= km_actual - ventana_km) & (kms_interp_arr <= km_actual + ventana_km)
-        kms_vis = kms_interp_arr[mask_visible]
-        elevs_vis = elevs_interp_arr[mask_visible]
-        # Filtrar los puntos con elevación también para calcular la pendiente solo sobre los visibles
-        # Necesitamos los objetos Point completos para los hover texts más adelante
-        puntos_visibles = [puntos_con_elevacion[i] for i in range(len(puntos_con_elevacion)) if mask_visible[i]]
+    # Filtrar puntos_con_elevacion por la ventana visible alrededor de km_actual
+    mask_visible = (kms_interp_arr >= km_actual - ventana_km) & (kms_interp_arr <= km_actual + ventana_km)
+    kms_vis = kms_interp_arr[mask_visible]
+    elevs_vis = elevs_interp_arr[mask_visible]
+    # Filtrar los puntos con elevación también para calcular la pendiente solo sobre los visibles
+    # Necesitamos los objetos Point completos para los hover texts más adelante
+    puntos_visibles = [puntos_con_elevacion[i] for i in range(len(puntos_con_elevacion)) if mask_visible[i]]
 
 
-        # Calcular pendiente solo para los puntos visibles, usando el slider window_length
-        if len(kms_vis) >= window_length: # Asegurarse de tener suficientes puntos válidos para el filtro
-            # calcular_pendiente_suavizada espera arrays de numpy
-            pendientes_vis = calcular_pendiente_suavizada(kms_vis, elevs_vis, window_length=window_length)
-        else:
-            if len(kms_vis) > 1: # Si hay puntos pero no suficientes para el filtro
-                 st.warning(f"No hay suficientes puntos visibles ({len(kms_vis)}) para calcular la pendiente con una ventana de {window_length}. Se mostrará el gráfico sin pendiente.")
-            pendientes_vis = np.full_like(elevs_vis, np.nan, dtype=float) # Array de NaNs si no se puede calcular
+    # Calcular pendiente solo para los puntos visibles, usando el slider window_length
+    pendientes_vis = np.full_like(elevs_vis, np.nan, dtype=float) # Inicializar con NaNs
+    if len(kms_vis) >= window_length and window_length >= 3: # Asegurarse de tener suficientes puntos válidos para el filtro (>= window_length)
+        # calcular_pendiente_suavizada espera arrays de numpy
+        try:
+            pendientes_vis = script2.calcular_pendiente_suavizada(kms_vis, elevs_vis, window_length=window_length) # <-- CAMBIO AQUÍ: Usar script2.
+        except Exception as e:
+             st.error(f"Error al calcular la pendiente: {e}")
+             pendientes_vis = np.full_like(elevs_vis, np.nan, dtype=float) # Si falla, dejar NaNs
 
-        # --- Generar Gráfico ---
-        st.subheader("📊 Perfil Altimétrico Visible")
+    elif len(kms_vis) > 1: # Si hay puntos pero no suficientes para el filtro con la ventana elegida
+         st.warning(f"No hay suficientes puntos visibles ({len(kms_vis)}) para calcular la pendiente con una ventana de {window_length} (se requieren al menos {window_length}). Se mostrará el gráfico sin pendiente suavizada en el rango visible.")
 
-        if len(kms_vis) > 1: # Asegurarse de tener al menos 2 puntos visibles para dibujar la línea
-            # Generar la figura Plotly usando la función de script2
-            fig = graficar_html(
+
+    # --- Generar Gráfico ---
+    st.subheader("📊 Perfil Altimétrico Visible")
+
+    fig = None # Inicializar la figura a None
+    if len(kms_vis) > 1: # Asegurarse de tener al menos 2 puntos visibles para dibujar la línea
+        # Generar la figura Plotly usando la función de script2
+        try:
+            # Pasar los datos visibles y las estaciones del tramo
+            fig = script2.graficar_html( # <-- CAMBIO AQUÍ: Usar script2.
                 puntos_visibles, # Pasar solo los puntos visibles para el gráfico
                 estaciones_tramo_list, # Pasar todas las estaciones del tramo para marcadores
-                # archivo_html="", # No se guarda a archivo HTML
                 titulo=f"{est_inicio} - {est_fin} | Km actual: {km_actual:.3f}",
                 slope_data=pendientes_vis, # Pasar las pendientes calculadas para los puntos visibles
                 theme="dark", # Usar tema oscuro
@@ -310,8 +312,16 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
             # Es mejor añadir esto aquí en la UI script
             if fig: # Asegurarse de que la figura se generó
                  # Calcular min/max Y del gráfico visible para la línea vertical
+                 # Usar np.nanmin/nanmax para ignorar NaNs
                  y_min_vis = np.nanmin(elevs_vis) if not np.all(np.isnan(elevs_vis)) else 0
                  y_max_vis = np.nanmax(elevs_vis) if not np.all(np.isnan(elevs_vis)) else 100
+
+                 # Asegurarse de que y_min/max sean números válidos y no infinitos
+                 if not np.isfinite(y_min_vis): y_min_vis = 0
+                 if not np.isfinite(y_max_vis): y_max_vis = 100
+                 if y_min_vis == y_max_vis: # Evitar línea si min y max son iguales
+                      y_min_vis, y_max_vis = y_min_vis - 10, y_max_vis + 10 # Dar un pequeño rango
+
 
                  fig.add_shape(type='line', x0=km_actual, x1=km_actual,
                                y0=y_min_vis, y1=y_max_vis, # Usar min/max de las elevaciones visibles
@@ -319,86 +329,118 @@ if not df_estaciones.empty and set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_e
                                name=f"Km actual: {km_actual:.3f}", # Nombre para hover
                                xref='x', yref='y') # Referenciar a los ejes de datos
 
-
                  # Mostrar el gráfico en Streamlit
                  st.plotly_chart(fig, use_container_width=True)
 
-                 # --- Sección de Exportación ---
-                 st.subheader("💾 Exportar Datos y Gráfico")
+        except Exception as e:
+             st.error(f"Error al generar el gráfico: {e}")
+             fig = None # Asegurarse de que fig es None si falla
 
-                 # Botón para exportar CSV
-                 csv_buffer = io.StringIO() # Buffer para datos de texto
+
+    elif len(kms_vis) > 0:
+         st.warning("Se cargó el tramo, pero solo hay un punto visible en el rango actual para graficar una línea.")
+    else:
+        st.warning("No hay puntos interpolados ni datos visibles en el rango seleccionado para graficar.")
+
+
+    # --- Sección de Exportación ---
+    # Mostrar la sección de exportación solo si se generaron puntos con elevación
+    if puntos_con_elevacion:
+        st.subheader("💾 Exportar Datos y Gráfico")
+
+        # Botón para exportar CSV
+        csv_buffer = io.StringIO() # Buffer para datos de texto
+        try:
+            # Usar todos los puntos con elevación para la exportación completa
+            # Necesitamos las pendientes para todos los puntos también si queremos incluirlas
+            # Si solo calculaste pendientes para los puntos visibles, pásalas. Si no, pasa NaNs para el resto.
+            # Para simplificar, exportamos todos los puntos con su elevación, y si la pendiente
+            # se calculó para esos puntos (ej. si ventana_km es grande o todo el tramo), se incluirá.
+            # Si solo se calculó para visibles, los puntos fuera de la ventana visible tendrán NaN en CSV de pendiente.
+            # Aquí, pasamos las pendientes visibles, asumiendo que son suficientes o se mapearán correctamente
+            # a los puntos interpolados completos dentro de exportar_csv si es necesario.
+            # Una forma más robusta sería calcular pendientes para *todos* los puntos interpolados
+            # si la ventana de suavizado lo permite, no solo los visibles.
+            # Por ahora, pasamos los puntos_con_elevacion completos y las pendientes_vis.
+            # Modificamos exportar_csv para manejar esto.
+            # O, calculamos pendientes para todos los puntos interpolados AQUI antes de filtrar para graficar.
+            # Vamos a calcular pendientes para todos los puntos interpolados si es posible.
+            pendientes_completas = np.full_like(elevs_interp_arr, np.nan, dtype=float)
+            if len(kms_interp_arr) >= window_length and window_length >= 3:
                  try:
-                     # exportar_csv ahora acepta el buffer directamente
-                     exportar_csv(puntos_con_elevacion, np.array([p.elevation if p.elevation is not None else np.nan for p in puntos_con_elevacion], dtype=float), csv_buffer, author="LAL") # Usar todos los puntos con elevación
-                     st.download_button(
-                         label="💾 Descargar Datos CSV (Todos los puntos)",
-                         data=csv_buffer.getvalue(),
-                         file_name=f"perfil_altimetrico_completo_{est_inicio}_{est_fin}.csv",
-                         mime="text/csv"
-                     )
+                    pendientes_completas = script2.calcular_pendiente_suavizada(kms_interp_arr, elevs_interp_arr, window_length=window_length)
                  except Exception as e:
-                      st.error(f"Error al generar CSV: {e}")
-
-                 # Botón para exportar KML
-                 kml_buffer = io.BytesIO() # Buffer para datos binarios
-                 try:
-                     # exportar_kml ahora acepta el buffer directamente (usando tempfile internamente)
-                     exportar_kml(puntos_con_elevacion, estaciones_tramo_list, kml_buffer, author="LAL") # Exportar estaciones y puntos interpolados (si aplica en func)
-                     st.download_button(
-                         label="💾 Descargar KML (Estaciones)", # KML solo exporta estaciones con elevación interpolada más cercana
-                         data=kml_buffer.getvalue(),
-                         file_name=f"estaciones_perfil_{est_inicio}_{est_fin}.kml",
-                         mime="application/vnd.google-earth.kml+xml"
-                     )
-                 except Exception as e:
-                      st.error(f"Error al generar KML: {e}")
+                    st.warning(f"Error al calcular pendientes para la exportación CSV completa: {e}. La columna de pendiente en el CSV podría tener NaNs.")
+                    pendientes_completas = np.full_like(elevs_interp_arr, np.nan, dtype=float)
 
 
-                 # Botón para exportar GeoJSON
-                 geojson_buffer = io.StringIO() # Buffer para datos de texto
-                 try:
-                     # exportar_geojson ahora acepta el buffer directamente
-                     exportar_geojson(puntos_con_elevacion, estaciones_tramo_list, geojson_buffer, author="LAL") # Exportar puntos interpolados y estaciones
-                     st.download_button(
-                         label="💾 Descargar GeoJSON (Puntos y Estaciones)",
-                         data=geojson_buffer.getvalue(),
-                         file_name=f"perfil_altimetrico_datos_{est_inicio}_{est_fin}.geojson",
-                         mime="application/geo+json"
-                     )
-                 except Exception as e:
-                      st.error(f"Error al generar GeoJSON: {e}")
+            script2.exportar_csv(puntos_con_elevacion, pendientes_completas, csv_buffer, author="LAL") # <-- CAMBIO AQUÍ: Usar script2. y pendientes_completas
+            st.download_button(
+                label="💾 Descargar Datos CSV (Todos los puntos)",
+                data=csv_buffer.getvalue(),
+                file_name=f"perfil_altimetrico_completo_{est_inicio.replace(' ','_')}_{est_fin.replace(' ','_')}.csv", # Nombre de archivo más amigable
+                mime="text/csv"
+            )
+        except Exception as e:
+             st.error(f"Error al generar CSV: {e}")
 
-                 # Botón para exportar PDF del gráfico
-                 try:
-                     # exportar_pdf ahora acepta el buffer directamente
-                     pdf_buffer = io.BytesIO()
-                     exportar_pdf(fig, pdf_buffer)
-                     st.download_button(
-                         label="💾 Descargar Gráfico PDF",
-                         data=pdf_buffer.getvalue(),
-                         file_name=f"perfil_altimetrico_grafico_{est_inicio}_{est_fin}.pdf",
-                         mime="application/pdf"
-                     )
-                 except Exception as e:
-                      st.error(f"Error al generar PDF del gráfico: {e}. Asegúrate de que la librería 'kaleido' esté instalada y funcionando en tu entorno Streamlit Cloud.")
+        # Botón para exportar KML
+        kml_buffer = io.BytesIO() # Buffer para datos binarios
+        try:
+            # exportar_kml ahora acepta el buffer directamente (usando tempfile internamente)
+            # KML exporta estaciones con elevación interpolada más cercana
+            script2.exportar_kml(puntos_con_elevacion, estaciones_tramo_list, kml_buffer, author="LAL") # <-- CAMBIO AQUÍ: Usar script2.
+            st.download_button(
+                label="💾 Descargar KML (Estaciones)",
+                data=kml_buffer.getvalue(),
+                file_name=f"estaciones_perfil_{est_inicio.replace(' ','_')}_{est_fin.replace(' ','_')}.kml", # Nombre de archivo más amigable
+                mime="application/vnd.google-earth.kml+xml"
+            )
+        except Exception as e:
+             st.error(f"Error al generar KML: {e}")
 
 
-        elif len(kms_vis) > 0:
-             st.warning("Se cargó el tramo, pero solo hay un punto visible en el rango actual para graficar una línea.")
-        else:
-            st.warning("No hay puntos interpolados ni datos visibles en el rango seleccionado para graficar.")
+        # Botón para exportar GeoJSON
+        geojson_buffer = io.StringIO() # Buffer para datos de texto
+        try:
+            # exportar_geojson ahora acepta el buffer directamente
+            # Exporta puntos interpolados y estaciones
+            script2.exportar_geojson(puntos_con_elevacion, estaciones_tramo_list, geojson_buffer, author="LAL") # <-- CAMBIO AQUÍ: Usar script2.
+            st.download_button(
+                label="💾 Descargar GeoJSON (Puntos y Estaciones)",
+                data=geojson_buffer.getvalue(),
+                file_name=f"perfil_altimetrico_datos_{est_inicio.replace(' ','_')}_{est_fin.replace(' ','_')}.geojson", # Nombre de archivo más amigable
+                mime="application/geo+json"
+            )
+        except Exception as e:
+             st.error(f"Error al generar GeoJSON: {e}")
 
-    elif archivo_subido and not df_estaciones.empty:
-         # Este caso maneja archivos que se cargaron pero no tienen las columnas correctas
-         # Este error ya se maneja arriba al llamar a cargar_estaciones
-         pass # No hacer nada aquí para evitar doble mensaje
+        # Botón para exportar PDF del gráfico
+        # Este botón solo está disponible si el gráfico se generó (if fig:)
+        if fig:
+            try:
+                # exportar_pdf ahora acepta el buffer directamente
+                pdf_buffer = io.BytesIO()
+                script2.exportar_pdf(fig, pdf_buffer) # <-- CAMBIO AQUÍ: Usar script2.
+                st.download_button(
+                    label="💾 Descargar Gráfico PDF",
+                    data=pdf_buffer.getvalue(),
+                    file_name=f"perfil_altimetrico_grafico_{est_inicio.replace(' ','_')}_{est_fin.replace(' ','_')}.pdf", # Nombre de archivo más amigable
+                    mime="application/pdf"
+                )
+            except Exception as e:
+                 st.error(f"Error al generar PDF del gráfico: {e}. Asegúrate de que la librería 'kaleido' esté instalada y funcionando en tu entorno Streamlit Cloud.")
 
+
+    # Si df_estaciones está vacío y no se ha subido ningún archivo, no mostramos nada.
+    # Si df_estaciones está vacío después de intentar cargar un archivo (por error),
+    # el mensaje de error específico ya se habrá mostrado.
 elif archivo_subido and df_estaciones.empty:
-     # Este caso ocurre si la carga inicial del archivo falló
-     pass # El error específico ya se mostró al cargar el archivo
+     # Este caso ocurre si la carga inicial del archivo falló o no tenía las columnas correctas
+     # Los mensajes de error específicos ya se mostraron
+     pass
 
 
-# Si df_estaciones está vacío y no se ha subido ningún archivo, no mostramos nada.
-# Si df_estaciones está vacío después de intentar cargar un archivo (por error),
-# el mensaje de error específico ya se habrá mostrado.
+# Añadir un mensaje o espacio al final si no se ha cargado nada
+if not archivo_subido:
+     st.info("⬆️ Subí un archivo CSV o KML para empezar.")
