@@ -17,7 +17,9 @@ st.set_page_config(page_title="Pantalla Cabina", layout="wide")
 st.title("🚆 Vista estilo cabina - Perfil altimétrico en tiempo real")
 
 st.markdown("""
-Cargá un archivo **CSV** o **KML** con estaciones (Nombre, Km, Lat, Lon). El sistema mostrará el perfil altimétrico alrededor del km actual.
+Cargá un archivo **CSV** o **KML** con estaciones (Nombre, Km, Lat, Lon). El sistema mostrará el perfil altimétrico alrededor del kilómetro actual.
+
+También podés elegir un subtramo del archivo y cuántos *workers* usar para consultar elevaciones. Más workers = más rápido, pero puede ser rechazado por la API (Error 429).
 """)
 
 # --- Procesar KML ---
@@ -46,7 +48,7 @@ def procesar_kml(kml_file):
                 continue
     return pd.DataFrame(datos)
 
-# --- Carga del archivo ---
+# --- Cargar archivo ---
 archivo_subido = st.file_uploader("📤 Subí tu archivo CSV o KML", type=["csv", "kml"])
 df_estaciones = pd.DataFrame()
 
@@ -59,23 +61,48 @@ if archivo_subido:
             df_estaciones = procesar_kml(tmp.name)
             os.remove(tmp.name)
 
-# --- Procesamiento principal ---
+# --- Validación y selección de subtramo ---
 if not df_estaciones.empty:
     df_estaciones.columns = [c.strip().capitalize() for c in df_estaciones.columns]
     if set(['Nombre', 'Km', 'Lat', 'Lon']).issubset(df_estaciones.columns):
         st.success("✅ Datos válidos cargados")
 
+        st.subheader("📍 Selección del tramo a visualizar")
+
+        estaciones_ordenadas = df_estaciones.sort_values("Km").reset_index(drop=True)
+        nombres_estaciones = estaciones_ordenadas["Nombre"].tolist()
+
+        est_inicio = st.selectbox("Estación inicial", nombres_estaciones, index=0)
+        est_fin = st.selectbox("Estación final", nombres_estaciones, index=len(nombres_estaciones)-1)
+
+        km_inicio = estaciones_ordenadas.loc[estaciones_ordenadas["Nombre"] == est_inicio, "Km"].values[0]
+        km_fin = estaciones_ordenadas.loc[estaciones_ordenadas["Nombre"] == est_fin, "Km"].values[0]
+
+        if km_inicio >= km_fin:
+            st.error("❌ La estación inicial debe estar antes que la final (según el kilómetro)")
+            st.stop()
+
+        df_tramo = estaciones_ordenadas[(estaciones_ordenadas["Km"] >= km_inicio) & (estaciones_ordenadas["Km"] <= km_fin)].copy()
+        st.success(f"✅ {len(df_tramo)} estaciones seleccionadas entre {est_inicio} y {est_fin}")
+
         st.subheader("⚙️ Parámetros de visualización")
         intervalo = st.slider("Intervalo de interpolación (m)", 50, 500, 100, step=10)
         ventana_km = st.slider("Rango visible (km)", 1, 10, 5)
-        km_actual = st.slider("Kilómetro actual", float(df_estaciones["Km"].min()), float(df_estaciones["Km"].max()), float(df_estaciones["Km"].mean()), step=0.1)
+        km_actual = st.slider("Kilómetro actual", float(km_inicio), float(km_fin), (km_inicio + km_fin)/2, step=0.1)
+        max_workers = st.slider("👷‍♂️ Número de workers para consultas a la API", 1, 10, 2,
+                                help="Cuantos más workers, más rápido será, pero aumenta el riesgo de que la API rechace las consultas (Error 429: Too Many Requests).")
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp_csv:
-            df_estaciones.to_csv(tmp_csv.name, index=False)
+            df_tramo.to_csv(tmp_csv.name, index=False)
             estaciones = cargar_estaciones(tmp_csv.name)
 
         puntos_interp = interpolar_puntos(estaciones, intervalo_m=intervalo)
-        puntos_interp = obtener_elevaciones_paralelo(puntos_interp)
+        puntos_interp = obtener_elevaciones_paralelo(
+            puntos_interp,
+            author="LAL",
+            progress_callback=st.progress(0).progress,
+            max_workers=max_workers
+        )
 
         kms = np.array([p.km for p in puntos_interp])
         elevs = np.array([p.elevation for p in puntos_interp])
@@ -95,7 +122,7 @@ if not df_estaciones.empty:
             if not np.isnan(pendiente):
                 fig.add_annotation(x=mid_km, y=mid_elev+1, text=f"{pendiente:+.1f}", showarrow=False, font=dict(size=14, color='white'))
 
-        tramo = f"{estaciones[0].nombre} - {estaciones[-1].nombre}"
+        tramo = f"{est_inicio} - {est_fin}"
         fig.update_layout(
             paper_bgcolor='black',
             plot_bgcolor='black',
@@ -107,5 +134,6 @@ if not df_estaciones.empty:
         )
 
         st.plotly_chart(fig, use_container_width=True)
+
     else:
         st.error("❌ El archivo debe tener las columnas: Nombre, Km, Lat, Lon")
