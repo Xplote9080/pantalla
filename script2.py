@@ -26,7 +26,7 @@ import simplekml
 from geojson import Point, Feature, FeatureCollection, dump
 import logging
 import os
-import tempfile # Aún necesario para exportaciones KML/GeoJSON si SimpleKML/GeoJSON no soportan buffers directamente
+import tempfile # Aún necesario para exportaciones KML si SimpleKML no soporta buffers directamente
 import pandas as pd
 from typing import List, Optional, NamedTuple, Dict, Union
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -104,8 +104,10 @@ def load_cache_to_memory() -> Dict[tuple[float, float], float]:
 def _load_elevation_from_cache(lat: float, lon: float) -> Optional[float]:
     """Carga elevación desde el caché en memoria."""
     # Asegura que el caché esté cargado. En Streamlit, se manejará con st.cache_resource.
-    # load_cache_to_memory()
+    # load_cache_to_memory() # No llamar aquí si se usa st.cache_resource en UI
     cache = _cache # Usar la variable global que st.cache_resource manejará
+    if cache is None: # Seguridad si no se usa st.cache_resource correctamente
+         cache = load_cache_to_memory()
     lat_r = round(lat, 5)
     lon_r = round(lon, 5)
     return cache.get((lat_r, lon_r))
@@ -361,7 +363,8 @@ def obtener_elevaciones_paralelo(puntos: List[InterpolatedPoint],
                          # Asignar la elevación al punto correcto usando el índice original
                         elev = elevations[point_idx_in_batch] if point_idx_in_batch < len(elevations) else DEFAULT_ELEVATION_ON_ERROR
                         puntos_con_elevacion[original_idx] = puntos[original_idx]._replace(elevation=elev)
-                        if elev != DEFAULT_ELEVATION_ON_ERROR: # Solo guardar en caché si la obtención fue exitosa (no valor por defecto)
+                        # Solo guardar en caché si la obtención fue exitosa (no valor por defecto) Y si la elevación es finita
+                        if elev != DEFAULT_ELEVATION_ON_ERROR and np.isfinite(elev):
                              _save_elevation_to_cache(puntos[original_idx].lat, puntos[original_idx].lon, elev, author)
 
                 except Exception as e:
@@ -381,7 +384,7 @@ def obtener_elevaciones_paralelo(puntos: List[InterpolatedPoint],
     # Paso 4: Llenar cualquier punto restante que haya fallado con el valor por defecto
     # Esto es una seguridad.
     for i, punto_final in enumerate(puntos_con_elevacion):
-        if punto_final is None or punto_final.elevation is None:
+        if punto_final is None or punto_final.elevation is None or not np.isfinite(punto_final.elevation):
             puntos_con_elevacion[i] = puntos[i]._replace(elevation=DEFAULT_ELEVATION_ON_ERROR)
 
     logging.info("Consulta de elevaciones finalizada.")
@@ -391,22 +394,22 @@ def obtener_elevaciones_paralelo(puntos: List[InterpolatedPoint],
     return puntos_con_elevacion
 
 
-def calcular_pendiente_suavizada(kms: np.ndarray, elevs: np.ndarray, window_length: int = DEFAULT_SMOOTH_WINDOW) -> np.ndarray:
+def calcular_pendiente_suavizada(kms: np.ndarray, elevs: np.ndarray, window_length: int) -> np.ndarray:
     """Calcula pendientes suavizadas (m/km) con filtro Savitzky-Golay."""
     # Asegurarse de que window_length sea impar y al menos 3
     # El valor se recibe del slider de Streamlit y ya se valida que sea impar y >= 3 allí.
     # Esta validación adicional es para seguridad si se llama la función directamente.
     if window_length % 2 == 0:
-        window_length += 1
+        window_length += 1 # Hacerlo impar
     if window_length < 3:
-        window_length = 3
+        window_length = 3 # Mínimo 3
 
 
     slope_m_per_km = np.full_like(elevs, np.nan, dtype=float) # Usar dtype float explícitamente
     kms_m = kms * 1000.0
-    valid_indices = ~np.isnan(elevs)
+    valid_indices = ~np.isnan(elevs) # Índices donde la elevación es un número válido
 
-    # Necesitamos al menos 'window_length' puntos válidos para el filtro Savitzky-Golay
+    # Necesitamos al menos 'window_length' puntos *válidos* para el filtro Savitzky-Golay
     num_valid = np.count_nonzero(valid_indices)
     if num_valid < window_length:
         logging.warning(f"No hay suficientes datos válidos ({num_valid}) para calcular pendiente con ventana {window_length}. Se necesitan al menos {window_length}. Retornando NaNs.")
@@ -415,7 +418,7 @@ def calcular_pendiente_suavizada(kms: np.ndarray, elevs: np.ndarray, window_leng
     valid_kms_m = kms_m[valid_indices]
     valid_elevs = elevs[valid_indices]
 
-    # Asegurarse de que la ventana no sea mayor que el número de puntos válidos
+    # Asegurarse de que la ventana efectiva no sea mayor que el número de puntos válidos
     effective_window = min(window_length, num_valid)
     # Asegurarse de que la ventana efectiva sea impar y al menos 3
     if effective_window % 2 == 0:
@@ -432,39 +435,43 @@ def calcular_pendiente_suavizada(kms: np.ndarray, elevs: np.ndarray, window_leng
 
 
     # Asumiendo que los puntos interpolados están casi uniformemente espaciados en KM:
-    delta_x_interp = np.mean(np.diff(kms_m)) # Delta x basado en los kms interpolados en metros
+    # Calcular la diferencia promedio entre los KM válidos (en metros)
+    delta_x_interp_valid = np.mean(np.diff(valid_kms_m))
 
-    if np.isclose(delta_x_interp, 0) or np.isnan(delta_x_interp):
-         logging.warning("Espaciado entre puntos interpolados es cero o NaN. No se puede calcular la pendiente. Retornando NaNs.")
+
+    if np.isclose(delta_x_interp_valid, 0) or np.isnan(delta_x_interp_valid):
+         logging.warning("Espaciado entre puntos interpolados válidos es cero o NaN. No se puede calcular la pendiente. Retornando NaNs.")
          return slope_m_per_km
 
 
     try:
         # Calcular la derivada (pendiente) usando el filtro Savitzky-Golay
-        gradient = savgol_filter(valid_elevs, window=effective_window, polyorder=polyorder, deriv=1, delta=delta_x_interp)
+        # delta = espaciado de la cuadrícula en la unidad del eje x (metros en valid_kms_m)
+        gradient = savgol_filter(valid_elevs, window=effective_window, polyorder=polyorder, deriv=1, delta=delta_x_interp_valid)
         # Convertir pendiente de m/m a m/km (multiplicar por 1000)
-        slope_m_per_km[valid_indices] = gradient * 1000.0
+        slope_m_per_km[valid_indices] = gradient * 1000.0 # Asignar pendientes solo a los índices válidos
     except Exception as e:
         logging.error(f"Error al calcular pendiente suavizada con Savitzky-Golay: {e}. Retornando NaNs.")
         return slope_m_per_km # Retornar NaNs en caso de error
 
     return slope_m_per_km
 
-def graficar_html(puntos_con_elevacion: List[InterpolatedPoint],
+def graficar_html(puntos_visibles: List[InterpolatedPoint], # Cambiado para recibir solo puntos visibles
                   estaciones_tramo: List[Station],
-                  # archivo_html: str, # No necesario para Streamlit
                   titulo: str = "Perfil altimétrico",
-                  slope_data: Optional[np.ndarray] = None,
+                  slope_data_vis: Optional[np.ndarray] = None, # Cambiado para recibir pendientes solo de puntos visibles
                   theme: str = "light",
                   colors: str = "cyan,yellow", # Colores actualizados para mejor contraste en fondo negro
                   watermark: str = "LAL 2025") -> Optional[go.Figure]:
     """Genera gráfico interactivo con tema, colores y marca de agua, retornando el objeto Figure."""
-    if not puntos_con_elevacion:
-        logging.warning("No hay puntos para graficar")
+    # Ahora la función recibe directamente los puntos visibles y las pendientes correspondientes
+    if not puntos_visibles:
+        logging.warning("No hay puntos visibles para graficar")
         return None
 
-    kms = np.array([p.km for p in puntos_con_elevacion])
-    elevs = np.array([p.elevation if p.elevation is not None else np.nan for p in puntos_con_elevacion], dtype=float)
+    kms = np.array([p.km for p in puntos_visibles])
+    elevs = np.array([p.elevation if p.elevation is not None else np.nan for p in puntos_visibles], dtype=float)
+
     # Parsear colores, manejar errores o formato incorrecto
     try:
         elev_color, slope_color = colors.split(',')
@@ -477,14 +484,14 @@ def graficar_html(puntos_con_elevacion: List[InterpolatedPoint],
         elev_color, slope_color = ("cyan", "yellow")
 
 
-    has_slope_data = slope_data is not None and isinstance(slope_data, np.ndarray) and len(slope_data) == len(kms)
+    has_slope_data = slope_data_vis is not None and isinstance(slope_data_vis, np.ndarray) and len(slope_data_vis) == len(kms)
 
     # Preparar texto de hover
     hover_texts = []
-    for i, p in enumerate(puntos_con_elevacion):
+    for i, p in enumerate(puntos_visibles):
         km_text = f"<b>Km: {p.km:.3f}</b><br>"
-        elev_text = f"Elev: {p.elevation:.1f} m" if p.elevation is not None and not np.isnan(p.elevation if p.elevation is not None else np.nan) else "Elev: N/A"
-        slope_text = f"Pendiente: {slope_data[i]:+.1f} m/km" if has_slope_data and i < len(slope_data) and not np.isnan(slope_data[i]) else "Pendiente: N/A"
+        elev_text = f"Elev: {p.elevation:.1f} m" if p.elevation is not None and np.isfinite(p.elevation) else "Elev: N/A" # Usar isfinite
+        slope_text = f"Pendiente: {slope_data_vis[i]:+.1f} m/km" if has_slope_data and i < len(slope_data_vis) and np.isfinite(slope_data_vis[i]) else "Pendiente: N/A" # Usar isfinite
         hover_texts.append(f"{km_text}{elev_text}<br>{slope_text}")
 
 
@@ -492,7 +499,7 @@ def graficar_html(puntos_con_elevacion: List[InterpolatedPoint],
 
     # Trazado de Elevación
     fig.add_trace(go.Scattergl(
-        x=kms, y=elevs, mode='lines', name='Elevación',
+        x=kms, y=elevs, mode='lines', name='Perfil', # Nombre cambiado a 'Perfil'
         line=dict(color=elev_color, width=2),
         hoverinfo='text', text=hover_texts, # Usamos el hover_texts preparado
         yaxis='y1'
@@ -500,48 +507,54 @@ def graficar_html(puntos_con_elevacion: List[InterpolatedPoint],
 
     # Marcadores de Estación
     if estaciones_tramo:
-        station_kms = np.array([s.km for s in estaciones_tramo])
-        # station_lats = np.array([s.lat for s in estaciones_tramo]) # No se usan directamente en el gráfico
-        # station_lons = np.array([s.lon for s in estaciones_tramo]) # No se usan directamente en el gráfico
+        # Filtrar estaciones para mostrar solo las que están aproximadamente en el rango visible
+        # Esto es una aproximación ya que el rango visible se define por Km
+        min_km_vis = min(kms) if len(kms) > 0 else None
+        max_km_vis = max(kms) if len(kms) > 0 else None
 
-        station_elevs = []
-        station_slopes = []
-        station_hover_texts = []
+        estaciones_visibles = []
+        if min_km_vis is not None and max_km_vis is not None:
+            estaciones_visibles = [est for est in estaciones_tramo if est.km >= min_km_vis and est.km <= max_km_vis]
 
-        # Intentar obtener elevación y pendiente de los puntos interpolados más cercanos
-        for est in estaciones_tramo:
-            # Encontrar el punto interpolado con el KM más cercano a la estación
-            # np.argmin(np.abs(kms - est.km)) requiere que kms no esté vacío
-            closest_idx = np.argmin(np.abs(kms - est.km)) if len(kms) > 0 else None
+        if estaciones_visibles:
+            station_kms = np.array([s.km for s in estaciones_visibles])
+            # Intentar obtener elevación y pendiente de los puntos interpolados visibles más cercanos
+            station_elevs = []
+            station_slopes = [] # No se usa en hovertext de estación, pero se podría añadir
+            station_hover_texts = []
 
-            if closest_idx is not None:
-                 elev = elevs[closest_idx] if not np.isnan(elevs[closest_idx]) else DEFAULT_ELEVATION_ON_ERROR
-                 slope = slope_data[closest_idx] if has_slope_data and closest_idx < len(slope_data) and not np.isnan(slope_data[closest_idx]) else "N/A"
-            else:
-                 # Si no hay puntos interpolados, usar valor por defecto
-                 elev = DEFAULT_ELEVATION_ON_ERROR
-                 slope = "N/A"
+            for est in estaciones_visibles:
+                # Encontrar el punto interpolado visible con el KM más cercano a la estación
+                closest_idx = np.argmin(np.abs(kms - est.km)) if len(kms) > 0 else None
 
-            station_elevs.append(elev)
-            station_slopes.append(slope)
-            station_hover_texts.append(f"<b>{est.nombre}</b><br>Km: {est.km:.3f}<br>Lat: {est.lat:.5f}<br>Lon: {est.lon:.5f}<br>Elev: {elev:.1f} m<br>Pendiente: {slope} m/km")
+                if closest_idx is not None:
+                     elev = elevs[closest_idx] if not np.isnan(elevs[closest_idx]) else script2.DEFAULT_ELEVATION_ON_ERROR # Usar default de script2
+                     # slope = slope_data_vis[closest_idx] if has_slope_data and closest_idx < len(slope_data_vis) and not np.isnan(slope_data_vis[closest_idx]) else "N/A" # No se usa en hovertext actual
+                else:
+                     # Si no hay puntos interpolados visibles, usar valor por defecto
+                     elev = script2.DEFAULT_ELEVATION_ON_ERROR
+                     # slope = "N/A"
+
+                station_elevs.append(elev)
+                # station_slopes.append(slope)
+                station_hover_texts.append(f"<b>{est.nombre}</b><br>Km: {est.km:.3f}<br>Lat: {est.lat:.5f}<br>Lon: {est.lon:.5f}<br>Elev: {elev:.1f} m")
 
 
-        fig.add_trace(go.Scatter(
-            x=station_kms, y=station_elevs, # Usar los KMs originales de la estación
-            mode='markers+text', text=[est.nombre for est in estaciones_tramo],
-            textposition="top center",
-            marker=dict(size=10, color='red', symbol='triangle-up', line=dict(width=1, color='white')), # Añadir borde blanco a marcadores
-            name='Estaciones', # Nombre genérico para la leyenda de marcadores
-            hoverinfo='text',
-            hovertext=station_hover_texts,
-            yaxis='y1'
-        ))
+            fig.add_trace(go.Scatter(
+                x=station_kms, y=station_elevs, # Usar los KMs originales de la estación
+                mode='markers+text', text=[est.nombre for est in estaciones_visibles],
+                textposition="top center",
+                marker=dict(size=10, color='red', symbol='triangle-up', line=dict(width=1, color='white')), # Añadir borde blanco a marcadores
+                name='Estaciones', # Nombre genérico para la leyenda de marcadores
+                hoverinfo='text',
+                hovertext=station_hover_texts,
+                yaxis='y1'
+            ))
 
     # Trazado de Pendiente
-    if has_slope_data:
+    if has_slope_data: # Usar slope_data_vis que ya está filtrada y calculada para los puntos visibles
         fig.add_trace(go.Scattergl(
-            x=kms, y=slope_data, mode='lines', name='Pendiente (m/km)',
+            x=kms, y=slope_data_vis, mode='lines', name='Pendiente (m/km)',
             line=dict(color=slope_color, width=1.5, dash='dash'),
             yaxis='y2',
             hoverinfo='skip' # skip para evitar doble hover si ya está en el primer trace
@@ -558,8 +571,8 @@ def graficar_html(puntos_con_elevacion: List[InterpolatedPoint],
             showarrow=False,
             font=dict(size=60, color="rgba(255,255,255,0.1)"), # Color semi-transparente blanco para fondo negro
             textangle=-30,
-            opacity=0.5,
-            layer="below" # Asegura que la marca de agua esté detrás de los datos
+            opacity=0.5
+            # layer="below" # <-- ELIMINADA LA PROPIEDAD 'layer'
         )
     ] if watermark and watermark.lower() != "none" else []
 
@@ -567,8 +580,8 @@ def graficar_html(puntos_con_elevacion: List[InterpolatedPoint],
         # Usar template completo para tema oscuro si se desea, o configurar individualmente
         template=template,
         # Configuración individual para asegurar fondo negro si template no es 'plotly_dark'
-        paper_bgcolor='black',
-        plot_bgcolor='black',
+        # paper_bgcolor='black', # Comentado para dejar que el template lo defina
+        # plot_bgcolor='black',  # Comentado para dejar que el template lo defina
 
         title=dict(text=titulo, x=0.5, xanchor='center', font=dict(size=18, color='white')),
         xaxis=dict(title='Kilómetro', color='white', showgrid=True, gridcolor='rgba(128,128,128,0.2)', zeroline=False, hoverformat='.3f'),
@@ -582,6 +595,7 @@ def graficar_html(puntos_con_elevacion: List[InterpolatedPoint],
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=12, color='white')),
         margin=dict(l=60, r=60, t=90, b=50),
 
+        # Añadir anotaciones (incluida la marca de agua si existe)
         annotations=annotations
     )
 
@@ -609,12 +623,19 @@ def exportar_kml(puntos_con_elevacion: List[InterpolatedPoint], estaciones_tramo
             logging.info(f"KML guardado en: {output}")
         elif isinstance(output, io.BytesIO):
             # Guardar a un archivo temporal, leer y escribir al buffer
-            with tempfile.NamedTemporaryFile(delete=True, suffix=".kml") as tmp: # delete=True, se elimina al cerrar
+            # Usar with para asegurar que el tempfile se cierre y elimine
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".kml") as tmp: # delete=False para que no se elimine al cerrar with
                 temp_filename = tmp.name
-            kml.save(temp_filename)
-            with open(temp_filename, 'rb') as f:
-                output.write(f.read())
-            # logging.info("KML guardado a BytesIO buffer.") # No loguear esto en bucle
+            try:
+                kml.save(temp_filename)
+                with open(temp_filename, 'rb') as f:
+                    output.write(f.read())
+                # logging.info("KML guardado a BytesIO buffer.") # No loguear esto en bucle
+            finally:
+                # Asegurarse de eliminar el archivo temporal
+                if os.path.exists(temp_filename):
+                    os.remove(temp_filename)
+
         else:
              raise TypeError("Output debe ser str (ruta de archivo) o io.BytesIO.")
 
@@ -687,7 +708,8 @@ def exportar_csv(puntos_con_elevacion: List[InterpolatedPoint], slope_data: np.n
             elev = p.elevation if p.elevation is not None else DEFAULT_ELEVATION_ON_ERROR
             row = [p.km, p.lat, p.lon, elev]
             if has_slope:
-                 slope = slope_data[i] if not np.isnan(slope_data[i]) else '' # Usar cadena vacía para NaN en CSV
+                 # Asegurarse de que el índice de slope_data sea válido antes de acceder
+                 slope = slope_data[i] if i < len(slope_data) and not np.isnan(slope_data[i]) else '' # Usar cadena vacía para NaN en CSV
                  row.append(slope)
             writer.writerow(row)
         # logging.info("CSV data generated.") # No loguear en bucle
@@ -698,4 +720,4 @@ def exportar_csv(puntos_con_elevacion: List[InterpolatedPoint], slope_data: np.n
 
 # --- Streamlit Cache para el caché en memoria ---
 # La función initialize_elevation_cache y la asignación a script2._cache
-# se moverán a pantalla_loco.py para que funcionen correctamente con st.cache_resource.
+# se manejan ahora en pantalla_loco.py.
